@@ -67,11 +67,24 @@ async function fetchJson(url, opts, ms) {
   const t = setTimeout(() => ctl.abort(), ms);
   try {
     const r = await fetch(url, { ...opts, signal: ctl.signal });
-    if (!r.ok) throw new Error(`${url} ${r.status}`);
+    if (!r.ok) throw Object.assign(new Error(`${url} ${r.status}`), { status: r.status });
     return await r.json();
   } finally { clearTimeout(t); }
 }
 const getJson = (url, ms = 4000) => fetchJson(url, { cache: "no-store" }, ms);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 灯内存吃紧时会回 503（原厂板常驻可用堆只有 ~55 KB），网络抖动与超时也常见：重试，间隔 300、600 ms。
+// 404 是确定的回答（如自制板没有 /nova），不重试。
+async function getJsonRetry(url, ms, tries = 3) {
+  for (let i = 1; ; i++) {
+    try { return await getJson(url, ms); }
+    catch (e) {
+      if (e.status === 404 || i >= tries) throw e;
+      await sleep(300 * i);
+    }
+  }
+}
 
 const wsLive = () => S.ws && S.ws.readyState === WebSocket.OPEN;
 
@@ -146,7 +159,7 @@ function setOnline(on) {
 async function loadPalx() {
   for (let page = 0, last = 0; page <= last; page++) {
     let p;
-    try { p = await getJson(`/json/palx?page=${page}`); } catch (_) { break; }
+    try { p = await getJsonRetry(`/json/palx?page=${page}`, 4000); } catch (_) { break; }   // 404 或重试用尽：留下已读到的
     last = p.m;
     Object.assign(S.palx, p.p);
   }
@@ -155,7 +168,7 @@ async function loadPalx() {
 
 // 读失败（presets = null）与「确实没有预设」（[]）必须分开：把失败当空列表会让「存当前状态」去覆盖 1 号预设
 async function loadPresets() {
-  try { S.presets = L.presetsFrom(await getJson("/presets.json", 10000)); S.presetsError = false; }
+  try { S.presets = L.presetsFrom(await getJsonRetry("/presets.json", 10000)); S.presetsError = false; }
   catch (_) { S.presets = null; S.presetsError = true; }
 }
 
@@ -572,13 +585,12 @@ function presetsPage() {
         const id = L.nextFreeSlot(S.presets);
         send({ psave: id, n: name.value.trim() || `预设 ${id}` });
         name.value = "";
-        await new Promise((r) => setTimeout(r, 600));    // 等灯写完 presets.json
-        await loadPresets();
+        await settlePresets((ps) => ps.some((p) => p.id === id));
       }
     } finally { S.saving = false; }
     if (S.page === "presets") renderSettings();
   };
-  const del = (p) => { if (confirm(`删除预设「${p.name}」？`)) { send({ pdel: p.id }); reloadPresets(); } };
+  const del = (p) => { if (confirm(`删除预设「${p.name}」？`)) { send({ pdel: p.id }); reloadPresets((ps) => !ps.some((q) => q.id === p.id)); } };
   const cur = S.state && S.state.ps;
   let list;
   if (S.presets) {
@@ -598,9 +610,14 @@ function presetsPage() {
     h("div", { class: "group" }, list),
   ];
 }
-async function reloadPresets() {
-  await new Promise((r) => setTimeout(r, 600));    // 等灯写完 presets.json
+// 等灯写完 presets.json：600 ms 后读一次；读不出来或结果还没体现这次改动（存的槽位还没有 / 删的还在），1.5 s 后再读一次
+async function settlePresets(done) {
+  await sleep(600);
   await loadPresets();
+  if (!S.presets || !done(S.presets)) { await sleep(1500); await loadPresets(); }
+}
+async function reloadPresets(done) {
+  await settlePresets(done);
   if (S.page === "presets") renderSettings();
 }
 
@@ -657,12 +674,14 @@ function novaOrNull(n) {
   return ok ? n : null;
 }
 
+// 逐个取（并发请求会同时吃堆，原厂板上容易 503），各自带重试。
+// 404 / 返回的不是 JSON = 这台灯没有该接口（/nova：自制板）；其余失败重试用尽就抛出，交给 boot 的退避重来，
+// 不静默降级成「没有讯飞入口」。
 async function loadBase() {
-  const b = await getJson("/json", 10000);
-  const [fx, nova] = await Promise.all([
-    getJson("/json/fxdata", 10000).catch(() => []),
-    getJson("/nova", 10000).then(novaOrNull).catch(() => null),        // 自制板没有：讯飞相关入口整个不显示
-  ]);
+  const b = await getJsonRetry("/json", 10000);
+  const absent = (e) => e.status === 404 || e instanceof SyntaxError;
+  const fx = await getJsonRetry("/json/fxdata", 10000).catch((e) => { if (absent(e)) return []; throw e; });
+  const nova = await getJsonRetry("/nova", 10000).then(novaOrNull).catch((e) => { if (absent(e)) return null; throw e; });
   return { b, fx, nova };
 }
 
