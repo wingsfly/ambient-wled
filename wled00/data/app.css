@@ -81,7 +81,7 @@ input[type=color]{width:44px;height:32px;border:0;background:none;padding:0}
 .group{background:var(--sf);border-radius:16px;overflow:hidden}
 .group .row:last-child{border-bottom:0}
 .row.col .t{white-space:normal;display:flex;flex-direction:column}
-.row.kv span{flex:1;color:var(--onv)}
-.row.kv b{font-weight:400;text-align:right;word-break:break-all}
+.row.kv span{flex:0 0 auto;max-width:45%;color:var(--onv)}
+.row.kv b{flex:1 1 auto;min-width:0;font-weight:400;text-align:right;word-break:break-all}
 .offline .act{pointer-events:none;opacity:.4}
 [hidden]{display:none!important}

@@ -55,7 +55,8 @@ function icon(name) {
 const rgbCss = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
 const hexRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
 // 灯上来的说明文字可能带 HTML：用惰性文档取纯文本，不执行、不加载任何东西
-const plain = (s) => new DOMParser().parseFromString(String(s), "text/html").body.textContent;
+// 并去掉私有区字符（U+E000–U+F8FF）：usermod 的按钮用图标字体字形，这里没有那套字体，只会显示成一个怪符号
+const plain = (s) => new DOMParser().parseFromString(String(s), "text/html").body.textContent.replace(/[\uE000-\uF8FF]/g, "");
 
 // ── 收发 ──
 
@@ -603,6 +604,8 @@ async function reloadPresets() {
   if (S.page === "presets") renderSettings();
 }
 
+const segFx = (s) => (S.effects[s.fx] ? L.effectDisplay(S.effects[s.fx]) : "");
+
 function segmentsPage() {
   if (!S.state) return LOADING();
   const segs = S.state.seg || [];
@@ -616,7 +619,7 @@ function segmentsPage() {
     h("h3", null, "当前分段"),
     h("div", { class: "group" }, segs.map((s) => h("div", { class: "row" },
       h("span", { class: "t" }, s.n || `段 ${s.id}`),
-      h("small", null, `${s.start}–${s.stop} · ${L.effectDisplay(S.effects[s.fx] || "")}`)))),
+      h("small", null, `${s.start}–${s.stop}${segFx(s) ? ` · ${segFx(s)}` : ""}`)))),
   ];
 }
 
