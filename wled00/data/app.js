@@ -12,7 +12,9 @@ const S = {
   state: null, info: null, effects: [], palettes: [], fxdata: [], nova: null, palx: {}, presets: null, presetsError: false, cw: null,
   tab: "fixed", lampMode: null, kind: "solid", lampKind: null, palShown: false,
   novaCat: null, wledFilter: "", musicFilter: null,
-  page: null,                       // 设置页：null 关闭；"root" / "presets" / "segments" / "info"
+  page: null,                       // 设置页：null 关闭；"root" / "presets" / "segments" / "info" / "palette"
+  custom: [], cpalLoaded: null,     // 灯上的自定义调色板 [{id, index, name}]（不含灰色占位）；上次读 palx 时的 cpalcount
+  palEdit: null,                    // 调色板编辑页：{index（新建为 null）, name, stops（读取中为 null）, err, busy}
   ws: null, wsTimer: null, lastMsg: 0, lastTick: 0, saving: false, online: true, lastOk: 0,
 };
 const $ = (id) => document.getElementById(id);
@@ -114,7 +116,7 @@ function connectWs() {
     if (typeof e.data !== "string" || e.data === "pong") return;
     let j;
     try { j = JSON.parse(e.data); } catch (_) { return; }
-    if (j.info) S.info = j.info;
+    if (j.info) { S.info = j.info; watchCpal(); }
     if (j.state) applyState(j.state);
   };
   ws.onclose = () => { if (S.ws === ws) { S.ws = null; scheduleWs(); } };
@@ -156,7 +158,11 @@ function setOnline(on) {
   document.body.classList.toggle("offline", !on);
 }
 
-async function loadPalx() {
+// 排队逐个跑：灯上自定义调色板数变了（/ws 带来的 info）与保存、删除后的重读可能撞在一起
+let palxJob = Promise.resolve();
+function loadPalx() { palxJob = palxJob.then(loadPalxOnce, loadPalxOnce); return palxJob; }
+async function loadPalxOnce() {
+  S.cpalLoaded = (S.info && S.info.cpalcount) || 0;
   for (let page = 0, last = 0; page <= last; page++) {
     let p;
     try { p = await getJsonRetry(`/json/palx?page=${page}`, 4000); } catch (_) { break; }   // 404 或重试用尽：留下已读到的
@@ -164,6 +170,7 @@ async function loadPalx() {
     Object.assign(S.palx, p.p);
   }
   if (S.palShown) renderMain();
+  await loadCustom();
 }
 
 // 读失败（presets = null）与「确实没有预设」（[]）必须分开：把失败当空列表会让「存当前状态」去覆盖 1 号预设
@@ -214,7 +221,7 @@ function update() {
   const pt = $("paltitle");
   if (pt) {
     const id = (L.primary(S.state) || {}).pal ?? 0;
-    const c = L.paletteChoices(S.palettes, (S.info && S.info.umpalnames) || [], S.nova).find((p) => p.id === id);
+    const c = palChoices().find((p) => p.id === id);
     pt.textContent = `调色板 · ${c ? c.title : id}`;
   }
   updateNightlight();
@@ -403,16 +410,22 @@ function params(ixLabel) { return h("div", { class: "card" }, slider("sx", "速�
 
 // 调色板：两行横滑卡片，每张画出调色板本身的渐变；讯飞的在前
 function paletteStrip() {
-  const choices = L.paletteChoices(S.palettes, (S.info && S.info.umpalnames) || [], S.nova);
   const segColors = (L.primary(S.state) || {}).col;
-  const strip = h("div", { class: "strip", dataset: { list: "pal" } }, choices.map((p) => {
+  const strip = h("div", { class: "strip", dataset: { list: "pal" } }, palChoices().map((p) => {
     const raw = S.palx[p.id];
     const stops = raw ? L.paletteStops(raw, segColors, p.id) : [];
-    return h("button", { class: "pal act", dataset: { k: String(p.id) }, onclick: () => send({ seg: [{ id: segId(), pal: p.id }] }) },
+    const card = h("button", { class: "pal act", dataset: { k: String(p.id) }, onclick: () => send({ seg: [{ id: segId(), pal: p.id }] }) },
       h("i", { style: `background:${gradient(stops)}` }),
       h("b", null, p.title),
       h("small", null, p.zh ? p.name.replace(/^讯飞: /, "") : " "));   // 英文原名，与经典界面、WLED 文档对得上
+    if (p.kind !== "custom") return card;
+    // 自定义的右上角一个编辑按钮（按钮里不能再套按钮，外面包一层）
+    return h("div", { class: "palw" }, card,
+      h("button", { class: "pedit act", "aria-label": "编辑调色板", onclick: () => editPalette(p) }, "✎"));
   }));
+  if (L.nextCustomSlot(customSlots(), cpalMax()) !== null) {
+    strip.append(h("button", { class: "pal new act", onclick: newPalette }, h("i", null, "＋"), h("b", null, "新建"), h("small", null, " ")));
+  }
   return h("div", { class: "palbox" }, h("div", { class: "note", id: "paltitle" }), strip);
 }
 function gradient(stops) {
@@ -420,6 +433,216 @@ function gradient(stops) {
   if (stops.length === 1) return rgbCss(stops[0][1]);
   const s = [...stops].sort((a, b) => a[0] - b[0]).map(([p, c]) => `${rgbCss(c)} ${(p * 100).toFixed(1)}%`);
   return `linear-gradient(90deg,${s.join(",")})`;
+}
+
+// ── 自定义调色板（WLED /paletteN.json，编号 200 − N；Light 仓库 docs/28 §10）──
+
+const palChoices = () => L.paletteChoices(S.palettes, (S.info && S.info.umpalnames) || [], S.nova, S.custom);
+const customSlots = () => L.customPaletteSlots(S.info && S.info.cpalcount, S.palx);
+const cpalMax = () => (S.info && S.info.cpalmax) || 129;
+const rgbHex = (c) => `#${c.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+
+// 别处（经典编辑器、另一个浏览器）增删了自定义调色板：/ws 带来的 info 里 cpalcount 变了就重读 palx 与名字
+function watchCpal() {
+  if (S.palEdit && S.palEdit.busy) return;    // 自己在保存 / 删除：完了会重读
+  const c = (S.info && S.info.cpalcount) || 0;
+  if (S.cpalLoaded != null && c !== S.cpalLoaded) { S.cpalLoaded = c; loadPalx(); }
+}
+
+// 名字在各自的文件里（"n"），逐个读（并发会吃灯的堆）；读不到（404、经典编辑器存过的没有 "n"）就用「自定义 N」
+let customGen = 0;
+async function loadCustom() {
+  const gen = ++customGen;
+  const list = [];
+  for (const s of customSlots().filter((x) => !x.placeholder)) {
+    let name = null;
+    try { name = L.decodePaletteFile(await getJsonRetry(`/palette${s.index}.json`, 4000)).name; } catch (_) { /* 没名字 */ }
+    list.push({ id: s.id, index: s.index, name });
+  }
+  if (gen !== customGen) return;            // 期间又开始了一轮，以新的为准
+  S.custom = list;
+  if (S.palShown) renderMain(); else update();
+}
+
+// 保存、删除之后：重读 info（cpalcount）、palx 与名字
+async function refreshPalettes() {
+  try { S.info = await getJsonRetry("/json/info", 4000); } catch (_) { /* 用旧的 */ }
+  await loadPalx();
+}
+
+// 等灯回话的状态修改（删除要确定做完了再重读列表）；send() 走 /ws 不等回音
+function postState(patch) {
+  return fetchJson("/json/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }, 4000)
+    .then((r) => { markOk(); return r; });
+}
+
+// 与经典编辑器（cpal.htm）同法：multipart，文件名即灯上的路径；回的是纯文本
+async function uploadJson(path, obj) {
+  const fd = new FormData();
+  fd.append("data", new Blob([JSON.stringify(obj)], { type: "application/json" }), path);
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 10000);
+  try {
+    const r = await fetch("/upload", { method: "POST", body: fd, signal: ctl.signal });
+    if (!r.ok) throw Object.assign(new Error(`/upload ${r.status}`), { status: r.status });
+    await r.text();
+  } finally { clearTimeout(t); }
+}
+
+const STOP_ERR = {
+  count: "色标需要 2–18 个",
+  ends: "第一个色标必须在 0、最后一个在 255",
+  order: "色标位置不能倒退",
+  range: "位置或颜色超出范围",
+};
+
+function openPalEditor(edit) {
+  S.palEdit = Object.assign({ index: null, name: "", stops: null, err: "", busy: false }, edit);
+  openSettings("palette");
+}
+function newPalette() { openPalEditor({ stops: [[0, [255, 160, 0]], [255, [0, 80, 255]]] }); }
+
+// 编辑：色标以文件为准（palx 给的是灯采样成 16 格的结果）；文件读不到再退回 palx
+function editPalette(p) {
+  const known = S.custom.find((c) => c.index === p.index);
+  openPalEditor({ index: p.index, name: (known && known.name) || "" });
+  const e = S.palEdit;
+  getJsonRetry(`/palette${p.index}.json`, 4000).then(L.decodePaletteFile, () => ({ name: null, stops: null })).then((d) => {
+    if (S.palEdit !== e) return;
+    const raw = d.stops ? d.stops.map(([pos, c]) => [pos].concat(c)) : S.palx[p.id];
+    // 走一遍 stopsFromPalette：补齐 0 与 255 两端（首尾位置在编辑页里是固定的）
+    const stops = raw ? L.stopsFromPalette(raw, (L.primary(S.state) || {}).col, p.id) : [];
+    if (stops.length >= 2) e.stops = stops;
+    else e.err = "读不出这个调色板的色标";
+    if (d.name) e.name = d.name;
+    if (S.page === "palette") renderSettings();
+  });
+}
+
+function palError(e, msg) {
+  e.err = msg;
+  if (S.palEdit === e && S.page === "palette") renderSettings();
+}
+function closePalEditor(e) {
+  if (S.palEdit !== e) return;               // 用户已经返回或换了一页
+  S.palEdit = null;
+  openSettings(null);
+}
+
+async function savePalette() {
+  const e = S.palEdit;
+  if (!e || e.busy || !e.stops) return;
+  const code = L.validateStops(e.stops);
+  if (code) return palError(e, STOP_ERR[code]);
+  e.busy = true;
+  palError(e, "");
+  // 新建：选槽位前现读一遍 info（别处可能刚加了一个），数变了连 palx 一起重读，免得写到别人刚占的槽
+  if (e.index == null) {
+    try { S.info = await getJsonRetry("/json/info", 4000); } catch (_) { /* 用旧的 */ }
+    if (((S.info && S.info.cpalcount) || 0) !== S.cpalLoaded) await loadPalx();
+  }
+  const slot = e.index != null ? e.index : L.nextCustomSlot(customSlots(), cpalMax());
+  if (slot == null) { e.busy = false; return palError(e, "自定义调色板已满，先删掉一个"); }
+  try { await uploadJson(`/palette${slot}.json`, L.encodePaletteFile(e.stops, e.name)); }
+  catch (err) {
+    e.busy = false;
+    return palError(e, err.status === 401 ? "灯的设置已用 PIN 锁住，请先在经典界面解锁"
+      : err.name === "AbortError" ? "保存超时，灯没有回应" : `保存失败（${err.status || "网络错误"}）`);
+  }
+  send({ seg: [{ id: segId(), pal: L.CUSTOM_ID_BASE - slot }] });    // 灯收完文件就重载了调色板，可以直接切过去
+  await refreshPalettes();
+  e.busy = false;
+  closePalEditor(e);
+}
+
+async function deletePalette() {
+  const e = S.palEdit;
+  if (!e || e.busy || e.index == null) return;
+  const id = L.CUSTOM_ID_BASE - e.index;
+  if (!confirm(`删除调色板「${e.name.trim() || `自定义 ${e.index}`}」？`)) return;
+  e.busy = true;
+  palError(e, "");
+  try {
+    if ((L.primary(S.state) || {}).pal === id) await postState({ seg: [{ id: segId(), pal: 0 }] });   // 正在用它就先切回默认
+    await postState({ rmcpal: e.index });
+  } catch (_) {
+    e.busy = false;
+    return palError(e, "删除失败，灯没有回应");
+  }
+  await refreshPalettes();
+  e.busy = false;
+  closePalEditor(e);
+}
+
+function copyPalette() {
+  const e = S.palEdit;
+  if (!e || e.busy || !e.stops) return;
+  const base = e.name.trim() || `自定义 ${e.index}`;
+  openPalEditor({ name: `${base} 副本`.slice(0, 32), stops: e.stops.map(([p, c]) => [p, c.slice()]) });
+}
+
+function palettePage() {
+  const e = S.palEdit;
+  if (!e) return LOADING();
+  const err = h("p", { class: "note err" }, e.err);
+  if (!e.stops) return [e.err ? err : LOADING()];
+  const preview = h("i", { class: "pgrad" });
+  const rows = h("div", { class: "group stops act" });
+  const count = h("small", null);
+  const add = h("button", { class: "btn", onclick: () => { e.stops = L.insertStop(e.stops); drawStops(); } }, "添加色标");
+  const drawPreview = () => { preview.style.background = gradient(e.stops.map(([p, c]) => [p / 255, c])); };
+  const stopRow = (i) => {
+    const st = e.stops;
+    const ends = i === 0 || i === st.length - 1;
+    const num = h("span", { class: "val" }, String(st[i][0]));
+    const pos = h("input", { type: "range", min: 0, max: 255, value: String(st[i][0]), disabled: ends, "aria-label": "位置" });
+    // 不越过相邻色标：夹到相邻的位置
+    pos.addEventListener("input", () => {
+      const v = Math.max(e.stops[i - 1][0], Math.min(e.stops[i + 1][0], Number(pos.value)));
+      pos.value = String(v);
+      e.stops[i][0] = v;
+      num.textContent = String(v);
+      drawPreview();
+    });
+    const col = h("input", { type: "color", value: rgbHex(st[i][1]), "aria-label": "颜色" });
+    col.addEventListener("input", () => { e.stops[i][1] = hexRgb(col.value); drawPreview(); });
+    const del = h("button", { class: "icon del", "aria-label": "删除色标", disabled: ends || st.length <= 2,
+      onclick: () => { e.stops.splice(i, 1); drawStops(); } }, "✕");
+    return h("div", { class: "stop" }, pos, num, col, del);
+  };
+  const drawStops = () => {
+    rows.replaceChildren(...e.stops.map((_, i) => stopRow(i)));
+    add.disabled = e.stops.length >= L.MAX_STOPS;
+    count.textContent = `${e.stops.length} / ${L.MAX_STOPS}`;
+    drawPreview();
+  };
+  drawStops();
+
+  const name = h("input", { type: "text", class: "filter", maxlength: 32, placeholder: e.index != null ? `自定义 ${e.index}` : "名字（可不填）",
+    value: e.name, oninput: () => { e.name = name.value; } });
+  // 从现有调色板开始：只列出读到了色标的
+  const segColors = (L.primary(S.state) || {}).col;
+  const from = h("select", { class: "filter" }, h("option", { value: "" }, "选择一个调色板…"),
+    palChoices().filter((p) => S.palx[p.id]).map((p) => h("option", { value: String(p.id) }, p.title)));
+  from.addEventListener("change", () => {
+    if (from.value === "") return;
+    const id = Number(from.value);
+    const stops = L.stopsFromPalette(S.palx[id], segColors, id);
+    if (stops.length >= 2) { e.stops = stops; drawStops(); }
+    from.value = "";
+  });
+  return h("div", { class: "ped" },
+    h("div", { class: "card", style: "margin-top:12px" }, preview, name),
+    h("h3", null, "色标"),
+    rows,
+    h("div", { class: "line act", style: "margin-top:8px" }, add, count),
+    h("h3", null, "从现有调色板开始"),
+    h("div", { class: "act" }, from),
+    h("div", { class: "line act", style: "margin-top:18px" },
+      h("button", { class: "btn pri", disabled: e.busy, onclick: savePalette }, e.busy ? "正在处理…" : "保存"),
+      e.index != null ? h("button", { class: "btn", disabled: e.busy, onclick: copyPalette }, "复制为新的") : null,
+      e.index != null ? h("button", { class: "btn danger", disabled: e.busy, onclick: deletePalette }, "删除") : null),
+    err);
 }
 
 // ── 照明 ──
@@ -534,9 +757,11 @@ function renderSettings() {
     return;
   }
   box.hidden = false;
-  const back = () => openSettings(S.page === "root" ? null : "root");
-  const titles = { root: "设置", presets: "预设", segments: "分区", info: "设备信息" };
-  const body = { root: settingsRoot, presets: presetsPage, segments: segmentsPage, info: infoPage }[S.page]();
+  // 调色板编辑页是从色带进来的，返回直接回首页
+  const back = () => { if (S.page === "palette") S.palEdit = null; openSettings(S.page === "root" || S.page === "palette" ? null : "root"); };
+  const titles = { root: "设置", presets: "预设", segments: "分区", info: "设备信息",
+    palette: S.palEdit && S.palEdit.index != null ? "编辑调色板" : "新建调色板" };
+  const body = { root: settingsRoot, presets: presetsPage, segments: segmentsPage, info: infoPage, palette: palettePage }[S.page]();
   box.replaceChildren(
     h("div", { class: "head" },
       h("header", { class: "top" }, h("button", { class: "icon", "aria-label": "返回", onclick: back }, icon("back")),
@@ -554,12 +779,12 @@ function settingsRoot() {
     h("div", { class: "group" }, nav("预设", "存下当前状态，一键切回", "presets"), nav("分区", "把灯柱分成几段", "segments")),
     h("h3", null, "高级"),
     h("div", { class: "group" },
-      link("经典 WLED 界面", "/classic"),
+      link("经典 WLED 界面", "/classic"), link("经典调色板编辑器", "/cpal.htm"),
       link("WLED 设置 · Wi-Fi", "/settings/wifi"), link("WLED 设置 · LED", "/settings/leds"),
       link("WLED 设置 · 界面", "/settings/ui"), link("WLED 设置 · 同步", "/settings/sync"),
       link("WLED 设置 · 时间与宏", "/settings/time"), link("WLED 设置 · 安全与更新", "/settings/sec"),
       link("WLED 设置 · Usermod", "/settings/um"), link("固件更新", "/update")),
-    h("p", { class: "note", style: "margin:8px 4px" }, "播放列表、逐段参数、自定义调色板、实时预览、多灯节点在经典界面里。"),
+    h("p", { class: "note", style: "margin:8px 4px" }, "播放列表、逐段参数、实时预览、多灯节点在经典界面里；经典调色板编辑器可从网上调色板库导入。"),
     h("h3", null, "信息"),
     h("div", { class: "group" }, nav("设备信息", "版本、联网、内存", "info")),
   ];
