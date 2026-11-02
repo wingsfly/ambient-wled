@@ -635,8 +635,18 @@ void initServer()
     }
   });
 
+  // ESPAsyncWebServer 的前缀匹配会让 /classic 也接住 /classic/ 与 /classic/xxx；
+  // 经典界面按相对地址取 iro.js 等，若这里都回首页就会无限重试。故只认精确的 /classic，
+  // /classic/ 用相对重定向回去（保留反向代理前缀），更深的路径给 404。
   server.on(F("/classic"), HTTP_GET, [](AsyncWebServerRequest *request) {
-    handleStaticContent(request, "", 200, FPSTR(CONTENT_TYPE_HTML), PAGE_index, PAGE_index_length);
+    const String &u = request->url();
+    if (u == "/classic") {
+      handleStaticContent(request, "", 200, FPSTR(CONTENT_TYPE_HTML), PAGE_index, PAGE_index_length);
+    } else if (u == "/classic/") {
+      request->redirect(F("../classic"));
+    } else {
+      request->send(404, FPSTR(CONTENT_TYPE_PLAIN), FPSTR(s_not_found));
+    }
   });
 
 #ifndef WLED_DISABLE_2D
