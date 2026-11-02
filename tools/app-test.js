@@ -86,8 +86,11 @@ function checkState(st, ctx) {
 const stateOf = (o, ctx) => checkState(field(o, "state", ctx), at(ctx, "state"));
 
 const EXPECTED_KEYS = ["说明", "fixture", "mode", "wledEffects", "musicEntries", "isCurrent",
-                       "paletteChoices", "usesPalette", "vendorWhite", "musicC1", "musicIndex"];
+                       "paletteChoices", "usesPalette", "vendorWhite", "musicC1", "musicIndex",
+                       "customSlots", "paletteFileDecode", "paletteFileEncode", "validateStops", "stopsFromPalette", "insertStop"];
 const CATEGORY_CODES = ["B", "S", "M", "V", "D"];
+const KINDS = ["usermod", "custom", "builtin"];
+const VALIDATE_CODES = [null, "count", "range", "order", "ends"];
 
 // fixture 惰性读取并校验：坏了只让用到它的用例失败，tableShape 之类仍能报出具体原因
 let fixtureCache;
@@ -108,7 +111,17 @@ function fixture() {
     `fixture.nova.scene.names[${i}]`, "恰好 [字符串, 整数]", e));
   need(isInt(field(music, "fx", "fixture.nova.music")), "fixture.nova.music.fx", "JSON 整数", music.fx);
   strArr(music, "names", "fixture.nova.music");
+  const cp = field(fx, "customPalettes", "fixture");
+  need(Array.isArray(cp), "fixture.customPalettes", "数组", cp);
+  cp.forEach((e, i) => {
+    const c = `fixture.customPalettes[${i}]`;
+    need(isObj(e), c, "JSON 对象", e);
+    need(isInt(field(e, "id", c)), at(c, "id"), "JSON 整数", e.id);
+    need(isInt(field(e, "index", c)), at(c, "index"), "JSON 整数", e.index);
+    strOrNull(field(e, "name", c), at(c, "name"));
+  });
   fixtureCache = {
+    customPalettes: cp,
     effects: strArr(fx, "effects", "fixture"),
     fxdata: strArr(fx, "fxdata", "fixture"),
     palettes: strArr(fx, "palettes", "fixture"),
@@ -133,6 +146,7 @@ function rowLabel(key, i, row) {
     if (isStr(row.name)) s += `「${row.name}」`;
     if ("withNova" in row) s += ` withNova=${show(row.withNova)}`;
     if ("filter" in row) s += ` filter=${show(row.filter)}`;
+    if ("cpalcount" in row) s += ` cpalcount=${show(row.cpalcount)}`;
   } else {
     s += ` ${show(row)}`;
   }
@@ -212,15 +226,16 @@ test("当前音乐项", () => {
 });
 
 test("调色板选择", () => {
-  const { palettes, umpalnames, nova } = fixture();
+  const { palettes, umpalnames, nova, customPalettes } = fixture();
   const want = [];
   eachRow("paletteChoices", (row, ctx) => {
-    const r = tuple(row, 2, ctx);
+    const r = tuple(row, 3, ctx);
     need(isInt(r[0]), "[0]", "JSON 整数", r[0]);
     strOrNull(r[1], "[1]");
-    want.push([r[0], r[1]]);
+    need(KINDS.includes(r[2]), "[2]", `种类 ${show(KINDS)} 之一`, r[2]);
+    want.push([r[0], r[1], r[2]]);
   });
-  same(L.paletteChoices(palettes, umpalnames, nova).map((p) => [p.id, p.zh]), want, "paletteChoices");
+  same(L.paletteChoices(palettes, umpalnames, nova, customPalettes).map((p) => [p.id, p.zh, p.kind]), want, "paletteChoices");
 });
 
 test("效果用不用调色板", () => {
@@ -252,6 +267,76 @@ test("讯飞音乐档位：c1 → 档位", () => {
   eachTuple("musicIndex", 3, (r) => {
     const [c1, n, i] = threeInts(r);
     same(L.musicIndex(c1, n), i, `c1=${c1} count=${n}`);
+  });
+});
+
+// ── 自定义调色板 ──
+const rgbOk = (c) => intList(c) && c.length === 3;
+const stopOk = (s) => Array.isArray(s) && s.length === 2 && isInt(s[0]) && rgbOk(s[1]);
+const stopList = (v, path) => need(Array.isArray(v) && v.every(stopOk), path, "[[位置, [r, g, b]], …]（整数）", v);
+const stopListField = (o, key, ctx) => { const v = field(o, key, ctx); stopList(v, at(ctx, key)); return v; };
+
+test("自定义槽位与占位", () => {
+  eachObj("customSlots", (c, ctx) => {
+    const count = field(c, "cpalcount", ctx), max = field(c, "max", ctx), palx = field(c, "palx", ctx);
+    need(isInt(count), at(ctx, "cpalcount"), "JSON 整数", count);
+    need(isInt(max), at(ctx, "max"), "JSON 整数", max);
+    need(isObj(palx), at(ctx, "palx"), "JSON 对象", palx);
+    const slots = field(c, "slots", ctx), nextFree = field(c, "nextFree", ctx);
+    need(Array.isArray(slots), at(ctx, "slots"), "数组", slots);
+    slots.forEach((r, i) => need(Array.isArray(r) && r.length === 3 && isInt(r[0]) && isInt(r[1]) && isBool(r[2]),
+      `${at(ctx, "slots")}[${i}]`, "恰好 [整数, 整数, 布尔]", r));
+    need(nextFree === null || isInt(nextFree), at(ctx, "nextFree"), "JSON 整数或 null", nextFree);
+    const got = L.customPaletteSlots(count, palx);
+    same(got.map((s) => [s.index, s.id, s.placeholder]), slots, "slots");
+    same(L.nextCustomSlot(got, max), nextFree, "nextFree");
+  });
+});
+
+test("自定义调色板文件：解码", () => {
+  eachObj("paletteFileDecode", (c, ctx) => {
+    str(c, "name", ctx);
+    const file = field(c, "file", ctx);                          // 可以不是对象（例如字符串）
+    const name = field(c, "expectName", ctx), stops = field(c, "expectStops", ctx);   // null = 没有
+    strOrNull(name, at(ctx, "expectName"));
+    if (stops !== null) stopList(stops, at(ctx, "expectStops"));
+    const got = L.decodePaletteFile(file);
+    same([got.name, got.stops], [name, stops], `file=${show(file)} 的 [名字, 色标]`);
+  });
+});
+
+test("自定义调色板文件：编码", () => {
+  eachObj("paletteFileEncode", (c, ctx) => {
+    const stops = stopListField(c, "stops", ctx), name = str(c, "name", ctx), file = field(c, "file", ctx);
+    need(isObj(file), at(ctx, "file"), "JSON 对象", file);
+    same(L.encodePaletteFile(stops, name), file, `stops=${show(stops)} name=${show(name)}`);
+  });
+});
+
+test("色标校验", () => {
+  eachTuple("validateStops", 2, (r) => {
+    need(Array.isArray(r[0]), "[0]", "数组", r[0]);
+    need(VALIDATE_CODES.includes(r[1]), "[1]", `${show(VALIDATE_CODES)} 之一`, r[1]);
+    same(L.validateStops(r[0]), r[1], `stops=${show(r[0])}`);
+  });
+});
+
+test("从现有调色板取色标", () => {
+  eachObj("stopsFromPalette", (c, ctx) => {
+    const raw = field(c, "raw", ctx), segColors = field(c, "segColors", ctx), id = field(c, "id", ctx);
+    need(Array.isArray(raw) && raw.every((x) => isStr(x) || intList(x)), at(ctx, "raw"), "字符串与整数数组组成的数组", raw);
+    need(segColors === null || (Array.isArray(segColors) && segColors.every(intList)), at(ctx, "segColors"), "null 或整数数组的数组", segColors);
+    need(isInt(id), at(ctx, "id"), "JSON 整数", id);
+    const stops = stopListField(c, "stops", ctx);
+    same(L.stopsFromPalette(raw, segColors, id), stops, `raw=${show(raw)}`);
+  });
+});
+
+test("插入色标", () => {
+  eachTuple("insertStop", 2, (r) => {
+    stopList(r[0], "[0]");
+    stopList(r[1], "[1]");
+    same(L.insertStop(r[0]), r[1], `stops=${show(r[0])}`);
   });
 });
 
