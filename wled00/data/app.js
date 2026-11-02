@@ -657,8 +657,8 @@ function novaOrNull(n) {
 async function loadBase() {
   const b = await getJson("/json", 10000);
   const [fx, nova] = await Promise.all([
-    getJson("/json/fxdata").catch(() => []),
-    getJson("/nova").then(novaOrNull).catch(() => null),        // 自制板没有：讯飞相关入口整个不显示
+    getJson("/json/fxdata", 10000).catch(() => []),
+    getJson("/nova", 10000).then(novaOrNull).catch(() => null),        // 自制板没有：讯飞相关入口整个不显示
   ]);
   return { b, fx, nova };
 }
