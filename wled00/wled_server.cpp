@@ -4,6 +4,7 @@
   #include "ota_update.h"  
 #endif
 #include "html_ui.h"
+#include "html_app.h"
 #include "html_settings.h"
 #include "html_other.h"
 #include "js_iro.h"
@@ -609,12 +610,30 @@ void initServer()
   });
 #endif
 
+  // lamp：首页换成与 App 同一布局的新界面（data/app.htm），经典界面原样留在 /classic。
+  // 文件系统里的 /index.htm 仍优先，用户自定义首页的能力不丢；?sliders 是经典界面的参数，转给它。
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (captivePortal(request)) return;
-    if (!showWelcomePage || request->hasArg(F("sliders"))) {
-      handleStaticContent(request, F("/index.htm"), 200, FPSTR(CONTENT_TYPE_HTML), PAGE_index, PAGE_index_length);
+    if (request->hasArg(F("sliders"))) {
+      handleStaticContent(request, "", 200, FPSTR(CONTENT_TYPE_HTML), PAGE_index, PAGE_index_length);
+    } else if (!showWelcomePage) {
+      handleStaticContent(request, F("/index.htm"), 200, FPSTR(CONTENT_TYPE_HTML), PAGE_app, PAGE_app_length);
     } else {
       serveSettings(request);
+    }
+  });
+
+  // ESPAsyncWebServer 的前缀匹配会让 /classic 也接住 /classic/ 与 /classic/xxx；
+  // 经典界面按相对地址取 iro.js 等，若这里都回首页就会无限重试。故只认精确的 /classic，
+  // /classic/ 用相对重定向回去（保留反向代理前缀），更深的路径给 404。
+  server.on(F("/classic"), HTTP_GET, [](AsyncWebServerRequest *request) {
+    const String &u = request->url();
+    if (u == "/classic") {
+      handleStaticContent(request, "", 200, FPSTR(CONTENT_TYPE_HTML), PAGE_index, PAGE_index_length);
+    } else if (u == "/classic/") {
+      request->redirect("../classic");
+    } else {
+      request->send(404, FPSTR(CONTENT_TYPE_PLAIN), FPSTR(s_not_found));
     }
   });
 

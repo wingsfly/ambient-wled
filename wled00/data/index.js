@@ -249,6 +249,7 @@ function onLoad()
 		// detect reverse proxy and/or HTTPS
 		let pathn = l.pathname;
 		let paths = pathn.slice(1,pathn.endsWith('/')?-1:undefined).split("/");
+		if (paths[paths.length-1]==="classic") paths.pop();  // lamp：经典界面挂在 /classic，这一段不是反向代理前缀
 		locproto = l.protocol;
 		locip = l.hostname + (l.port ? ":" + l.port : "");
 		if (paths.length > 0 && paths[0]!=="") {
