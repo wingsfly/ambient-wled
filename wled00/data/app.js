@@ -411,7 +411,8 @@ function params(ixLabel) { return h("div", { class: "card" }, slider("sx", "速�
 // 调色板：两行横滑卡片，每张画出调色板本身的渐变；讯飞的在前
 function paletteStrip() {
   const segColors = (L.primary(S.state) || {}).col;
-  const strip = h("div", { class: "strip", dataset: { list: "pal" } }, palChoices().map((p) => {
+  const choices = palChoices();
+  const cards = choices.map((p) => {
     const raw = S.palx[p.id];
     const stops = raw ? L.paletteStops(raw, segColors, p.id) : [];
     const card = h("button", { class: "pal act", dataset: { k: String(p.id) }, onclick: () => send({ seg: [{ id: segId(), pal: p.id }] }) },
@@ -422,10 +423,14 @@ function paletteStrip() {
     // 自定义的右上角一个编辑按钮（按钮里不能再套按钮，外面包一层）
     return h("div", { class: "palw" }, card,
       h("button", { class: "pedit act", "aria-label": "编辑调色板", onclick: () => editPalette(p) }, "✎"));
-  }));
+  });
+  // 「＋ 新建」紧跟在自定义之后（没有自定义就跟在讯飞之后），即内置调色板之前
   if (L.nextCustomSlot(customSlots(), cpalMax()) !== null) {
-    strip.append(h("button", { class: "pal new act", onclick: newPalette }, h("i", null, "＋"), h("b", null, "新建"), h("small", null, " ")));
+    const at = choices.findIndex((p) => p.kind === "builtin");
+    cards.splice(at < 0 ? cards.length : at, 0,
+      h("button", { class: "pal new act", onclick: newPalette }, h("i", null, "＋"), h("b", null, "新建"), h("small", null, " ")));
   }
+  const strip = h("div", { class: "strip", dataset: { list: "pal" } }, cards);
   return h("div", { class: "palbox" }, h("div", { class: "note", id: "paltitle" }), strip);
 }
 function gradient(stops) {
@@ -563,7 +568,9 @@ async function deletePalette() {
   e.busy = true;
   palError(e, "");
   try {
-    if ((L.primary(S.state) || {}).pal === id) await postState({ seg: [{ id: segId(), pal: 0 }] });   // 正在用它就先切回默认
+    // 用着它的段（不只主段）先切回默认调色板
+    const using = ((S.state && S.state.seg) || []).filter((g) => g.pal === id).map((g) => ({ id: g.id, pal: 0 }));
+    if (using.length) await postState({ seg: using });
     await postState({ rmcpal: e.index });
   } catch (_) {
     e.busy = false;
