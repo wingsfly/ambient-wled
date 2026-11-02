@@ -583,7 +583,7 @@ function presetsPage() {
       await loadPresets();                    // 选槽位前现读一遍，读不出来就不存，免得盖掉已有预设
       if (S.presets) {
         const id = L.nextFreeSlot(S.presets);
-        send({ psave: id, n: name.value.trim() || `预设 ${id}` });
+        send({ psave: id, n: name.value.trim() || `预设 ${id}`, ib: true, sb: true });   // 与经典界面默认一致：带亮度与分区边界
         name.value = "";
         await settlePresets((ps) => ps.some((p) => p.id === id));
       }
@@ -606,7 +606,7 @@ function presetsPage() {
   }
   return [
     h("div", { class: "line act", style: "margin-top:12px" }, name, btn),
-    h("p", { class: "note", style: "margin:8px 4px" }, "存的是灯现在的状态。播放列表请在经典界面编辑。"),
+    h("p", { class: "note", style: "margin:8px 4px" }, "存下灯现在的效果、颜色、亮度与分区。播放列表请在经典界面编辑。"),
     h("div", { class: "group" }, list),
   ];
 }
@@ -675,14 +675,51 @@ function novaOrNull(n) {
 }
 
 // 逐个取（并发请求会同时吃堆，原厂板上容易 503），各自带重试。
-// 404 / 返回的不是 JSON = 这台灯没有该接口（/nova：自制板）；其余失败重试用尽就抛出，交给 boot 的退避重来，
-// 不静默降级成「没有讯飞入口」。
+// /json 必须取到：失败由 boot 退避重来。/json/fxdata 与 /nova 是可选的：404 / 返回的不是 JSON = 这台灯没有该接口（自制板没有 /nova），
+// 算已解决；其余失败重试用尽就先降级（fxdata [] / nova null）让页面能用，由 retryOptional 在后台每 10 秒再取，直到成功。
+const absent = (e) => e.status === 404 || e instanceof SyntaxError;
+async function fetchOptional(url, parse, none) {
+  try { return { done: true, value: parse(await getJsonRetry(url, 10000)) }; }
+  catch (e) {
+    if (absent(e)) return { done: true, value: none };
+    console.warn(`${url} 暂时取不到，先降级，稍后重试`, e);
+    return { done: false, value: none };
+  }
+}
+const fetchFxdata = () => fetchOptional("/json/fxdata", (j) => (Array.isArray(j) ? j : []), []);
+const fetchNova = () => fetchOptional("/nova", novaOrNull, null);
+
 async function loadBase() {
   const b = await getJsonRetry("/json", 10000);
-  const absent = (e) => e.status === 404 || e instanceof SyntaxError;
-  const fx = await getJsonRetry("/json/fxdata", 10000).catch((e) => { if (absent(e)) return []; throw e; });
-  const nova = await getJsonRetry("/nova", 10000).then(novaOrNull).catch((e) => { if (absent(e)) return null; throw e; });
+  const fx = await fetchFxdata();
+  const nova = await fetchNova();
   return { b, fx, nova };
+}
+
+// 后台补取降级掉的 fxdata / nova；到手后重算大类并重画，两个都解决就停
+function retryOptional(fx, nova) {
+  const todo = { fx: !fx.done, nova: !nova.done };
+  if (!todo.fx && !todo.nova) return;
+  const tick = async () => {
+    let changed = false;
+    if (todo.fx) {
+      const r = await fetchFxdata();
+      if (r.done) { todo.fx = false; S.fxdata = r.value; changed = true; }
+    }
+    if (todo.nova) {
+      const r = await fetchNova();
+      if (r.done) { todo.nova = false; S.nova = r.value; changed = true; }
+    }
+    if (changed) {
+      const k = L.fixedKind(S.state, S.nova);
+      if (S.kind === S.lampKind) S.kind = k;
+      S.lampKind = k;
+      try { renderMain(); } catch (e) { console.error(e); }
+      if (S.page) renderSettings();
+    }
+    if (todo.fx || todo.nova) setTimeout(tick, 10000);
+  };
+  setTimeout(tick, 10000);
 }
 
 async function boot() {
@@ -693,10 +730,10 @@ async function boot() {
     catch (_) { setOnline(false); await new Promise((r) => setTimeout(r, wait)); }
   }
   const { b, fx, nova } = base;
-  Object.assign(S, { info: b.info, effects: b.effects || [], palettes: b.palettes || [], fxdata: fx, nova });
+  Object.assign(S, { info: b.info, effects: b.effects || [], palettes: b.palettes || [], fxdata: fx.value, nova: nova.value });
   S.state = b.state;
   S.lampMode = S.tab = L.mode(b.state, S.effects);
-  S.lampKind = S.kind = L.fixedKind(b.state, nova);
+  S.lampKind = S.kind = L.fixedKind(b.state, S.nova);
   markOk();
   try { renderMain(); }
   catch (e) {                                  // 渲染出错不是「离线」：留一行可见的提示和控制台堆栈，不重载
@@ -708,5 +745,6 @@ async function boot() {
   setInterval(poll, 3000);
   loadPalx();
   loadPresets();
+  retryOptional(fx, nova);
 }
 document.addEventListener("DOMContentLoaded", boot);
