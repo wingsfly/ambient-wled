@@ -465,15 +465,28 @@ private struct PaletteGallery: View {
     @EnvironmentObject private var model: LampViewModel
     let current: Int
     let segColors: [[Int]]?
+    /// 打开中的编辑窗（新建 / 编辑 / 复制为新的）。
+    @State private var editing: PaletteDraft?
+    /// 等待确认删除的自定义调色板。
+    @State private var deleting: PaletteChoice?
+    @State private var message: String?
+    /// 正在读文件准备打开编辑窗，防止连点。
+    @State private var loading = false
 
     var body: some View {
+        // 顺序是讯飞 → 自定义 → 内置；「＋ 新建」紧跟在自定义之后（没有自定义就跟在讯飞之后）
+        let choices = model.paletteChoices
+        let lead = choices.prefix { $0.kind != .builtin }
+        let rest = choices.dropFirst(lead.count)
         VStack(alignment: .leading, spacing: 6) {
-            Text("调色板 · \(model.paletteChoices.first { $0.id == current }?.title ?? "")")
+            Text("调色板 · \(choices.first { $0.id == current }?.title ?? "")")
                 .font(.caption).foregroundStyle(.secondary)
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], spacing: 8) {
-                        ForEach(model.paletteChoices) { p in card(p).id(p.id) }
+                        ForEach(lead) { p in card(p).id(p.id) }
+                        if model.canCreatePalette { newCard }
+                        ForEach(rest) { p in card(p).id(p.id) }
                     }
                     .padding(2)
                 }
@@ -481,6 +494,57 @@ private struct PaletteGallery: View {
                 .onAppear { proxy.scrollTo(current, anchor: .center) }
                 .onChange(of: current) { _, id in withAnimation { proxy.scrollTo(id, anchor: .center) } }
             }
+        }
+        .sheet(item: $editing) { d in
+            ConsolePaletteEditor(draft: d) { message = $0 }
+                .environmentObject(model)
+        }
+        .alert("删除调色板", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+               presenting: deleting) { p in
+            Button("删除", role: .destructive) {
+                guard let index = p.index else { return }
+                Task { message = await model.deletePalette(index: index) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: { p in
+            Text("删除「\(p.title)」？其他自定义调色板的编号不变。")
+        }
+        .alert(message ?? "", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
+            Button("好") {}
+        }
+    }
+
+    private var newCard: some View {
+        Button { editing = PaletteDraft(index: nil, name: "", stops: PaletteDraft.newStops) } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(Color.secondary.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    .frame(height: 22)
+                    .overlay(Image(systemName: "plus").foregroundStyle(.secondary))
+                Text("新建").font(.caption).lineLimit(1)
+                Text(" ").font(.caption2)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(model.busy)
+        .help("新建自定义调色板")
+    }
+
+    /// 编辑 / 复制为新的：先读灯上的文件（名字与色标以文件为准），读到了再打开编辑窗。
+    private func open(_ p: PaletteChoice, copy: Bool) {
+        guard let index = p.index, !loading else { return }
+        loading = true
+        Task {
+            defer { loading = false }
+            guard let e = await model.paletteStops(forEdit: index) else {
+                message = "读不出这个调色板的色标"
+                return
+            }
+            let name = e.name ?? model.customPalettes.first { $0.index == index }?.name ?? ""
+            editing = copy
+                ? PaletteDraft(index: nil, name: PaletteDraft.copyName(name, index: index), stops: e.stops)
+                : PaletteDraft(index: index, name: name, stops: e.stops)
         }
     }
 
@@ -504,6 +568,15 @@ private struct PaletteGallery: View {
         }
         .buttonStyle(.plain)
         .help(p.name)
+        .contextMenu {
+            // 只有自定义的能改；右键菜单与 iOS 的长按菜单同一套
+            if p.kind == .custom {
+                Button("编辑") { open(p, copy: false) }
+                Button("复制为新的") { open(p, copy: true) }
+                Divider()
+                Button("删除", role: .destructive) { deleting = p }
+            }
+        }
     }
 
     private func swatch(_ stops: [(Double, [Int])]) -> AnyShapeStyle {
@@ -517,7 +590,8 @@ private struct PaletteGallery: View {
     }
 }
 
-private extension Color {
+/// 调色板编辑窗（ConsolePaletteEditor）也用。
+extension Color {
     init(rgb: [Int]) {
         let c = rgb + [0, 0, 0]
         self.init(red: Double(c[0]) / 255, green: Double(c[1]) / 255, blue: Double(c[2]) / 255)
