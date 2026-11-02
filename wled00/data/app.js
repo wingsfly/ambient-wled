@@ -4,15 +4,16 @@
 // 纯逻辑在 app_logic.js（有 Node 测试），这里只管 DOM 与收发。
 //
 // 标签跟着灯走：灯的大类在别处（讯飞 App、按键、Matter、另一个浏览器）变了才跟着切；
-// 点标签只换显示，不改灯。状态走 /ws 实时推送，/ws 不通时每 3 秒轮询 /json/state。
+// 点标签只换显示，不改灯。状态走 /ws 实时推送；/ws 通着时每 3 秒发一次 "p"（灯回 "pong"），
+// 超过 7 秒没收到任何消息就当它断了，改走每 3 秒轮询 /json/state，同时重连 /ws。
 
 const L = LampLogic;
 const S = {
-  state: null, info: null, effects: [], palettes: [], fxdata: [], nova: null, palx: {}, presets: [], cw: null,
+  state: null, info: null, effects: [], palettes: [], fxdata: [], nova: null, palx: {}, presets: null, presetsError: false, cw: null,
   tab: "fixed", lampMode: null, kind: "solid", lampKind: null, palShown: false,
   novaCat: null, wledFilter: "", musicFilter: null,
   page: null,                       // 设置页：null 关闭；"root" / "presets" / "segments" / "info"
-  ws: null, wsOpen: false, online: true, lastOk: 0,
+  ws: null, wsTimer: null, lastMsg: 0, online: true, lastOk: 0,
 };
 const $ = (id) => document.getElementById(id);
 
@@ -64,35 +65,61 @@ async function getJson(url) {
   return r.json();
 }
 
+const wsLive = () => S.ws && S.ws.readyState === WebSocket.OPEN;
+
 function send(patch) {
-  if (S.ws && S.wsOpen) { S.ws.send(JSON.stringify(patch)); return; }
+  if (wsLive()) { S.ws.send(JSON.stringify(patch)); return; }
   fetch("/json/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...patch, v: true }) })
-    .then((r) => r.json())
+    .then((r) => { if (!r.ok) throw new Error(`state ${r.status}`); return r.json(); })
     .then((st) => { if (st && "on" in st) applyState(st); markOk(); })
     .catch(markFail);
 }
 
+function scheduleWs() {
+  if (S.wsTimer) return;
+  S.wsTimer = setTimeout(() => { S.wsTimer = null; connectWs(); }, 3000);
+}
 function connectWs() {
+  if (S.ws) return;
   let ws;
   try { ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`); }
-  catch (e) { setTimeout(connectWs, 3000); return; }
+  catch (e) { scheduleWs(); return; }
   S.ws = ws;
-  ws.onopen = () => { S.wsOpen = true; markOk(); };
+  ws.onopen = () => { S.lastMsg = Date.now(); markOk(); };
   ws.onmessage = (e) => {
-    if (typeof e.data !== "string") return;
+    S.lastMsg = Date.now();
+    markOk();                                   // "pong" 与二进制帧也算活着
+    if (typeof e.data !== "string" || e.data === "pong") return;
     let j;
     try { j = JSON.parse(e.data); } catch (_) { return; }
     if (j.info) S.info = j.info;
     if (j.state) applyState(j.state);
-    markOk();
   };
-  ws.onclose = () => { S.wsOpen = false; S.ws = null; setTimeout(connectWs, 3000); };
+  ws.onclose = () => { if (S.ws === ws) { S.ws = null; scheduleWs(); } };
+}
+// 半开的连接（灯断电、Wi-Fi 切换）不会触发 onclose：自己判死，摘掉回调、直接换路
+function dropWs() {
+  const ws = S.ws;
+  S.ws = null;
+  if (ws) { ws.onopen = ws.onmessage = ws.onclose = null; try { ws.close(); } catch (_) { /* 已经死了 */ } }
+  scheduleWs();
 }
 
 async function poll() {
-  if (S.wsOpen) return;
+  if (wsLive()) {
+    if (Date.now() - S.lastMsg > 7000) { markFail(); dropWs(); return; }
+    try { S.ws.send("p"); } catch (_) { /* 下一拍再判 */ }
+    return;
+  }
   try { applyState(await getJson("/json/state")); markOk(); } catch (_) { markFail(); }
 }
+// 回到前台时立即对一次：后台期间定时器和 /ws 都可能被系统挂起
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible" || !S.state) return;
+  if (wsLive()) { S.lastMsg = Date.now(); try { S.ws.send("p"); } catch (_) { /* 下一拍再判 */ } }
+  else connectWs();
+  getJson("/json/state").then((st) => { applyState(st); markOk(); }).catch(markFail);
+});
 function markOk() { S.lastOk = Date.now(); setOnline(true); }
 function markFail() { if (Date.now() - S.lastOk > 6000) setOnline(false); }
 function setOnline(on) {
@@ -112,8 +139,10 @@ async function loadPalx() {
   if (S.palShown) renderMain();
 }
 
+// 读失败（presets = null）与「确实没有预设」（[]）必须分开：把失败当空列表会让「存当前状态」去覆盖 1 号预设
 async function loadPresets() {
-  try { S.presets = L.presetsFrom(await getJson("/presets.json")); } catch (_) { S.presets = []; }
+  try { S.presets = L.presetsFrom(await getJson("/presets.json")); S.presetsError = false; }
+  catch (_) { S.presets = null; S.presetsError = true; }
 }
 
 // ── 状态 ──
@@ -182,6 +211,13 @@ function slider(key, label, min = 0, max = 255) {
   const inp = h("input", { type: "range", min, max, dataset: { bind: key } });
   let last = 0, timer = null;
   const push = () => { timer = null; last = Date.now(); BIND[key].set(Number(inp.value)); };
+  // 松手有好几种收法（鼠标、触摸、被系统打断、失焦），任一发生都清拖动标记并把最终值发出去
+  const end = () => {
+    if (!inp.dataset.drag) return;
+    delete inp.dataset.drag;
+    if (timer) clearTimeout(timer);
+    push();
+  };
   inp.addEventListener("input", () => {
     inp.dataset.drag = "1";
     out.textContent = inp.value;
@@ -189,11 +225,7 @@ function slider(key, label, min = 0, max = 255) {
     const wait = 120 - (Date.now() - last);
     if (wait <= 0) push(); else if (!timer) timer = setTimeout(push, wait);
   });
-  inp.addEventListener("change", () => {
-    delete inp.dataset.drag;
-    if (timer) clearTimeout(timer);
-    push();
-  });
+  for (const ev of ["change", "pointerup", "pointercancel", "touchend", "touchcancel", "blur"]) inp.addEventListener(ev, end);
   return h("div", { class: "slider act" }, h("label", null, label), inp, out);
 }
 function syncBind(inp) {
@@ -231,9 +263,16 @@ function syncList(box) {
   }
   if (hit) scrollInto(box, hit);
 }
+// 选中行已经完整在框内就不动，免得每次状态推送都把列表拽一下
 function scrollInto(box, el) {
-  if (box.classList.contains("strip")) box.scrollLeft = el.offsetLeft - box.clientWidth / 2 + el.offsetWidth / 2;
-  else box.scrollTop = el.offsetTop - box.clientHeight / 2 + el.offsetHeight / 2;
+  const b = box.getBoundingClientRect(), r = el.getBoundingClientRect();
+  if (box.classList.contains("strip")) {
+    if (r.left >= b.left && r.right <= b.right) return;
+    box.scrollLeft += (r.left - b.left) - box.clientWidth / 2 + r.width / 2;
+  } else {
+    if (r.top >= b.top && r.bottom <= b.bottom) return;
+    box.scrollTop += (r.top - b.top) - box.clientHeight / 2 + r.height / 2;
+  }
 }
 
 function row({ k, title, onclick, extra, name }) {
@@ -255,12 +294,13 @@ function docBlock(d) {
 
 function shell() {
   document.body.append(
-    h("header", { class: "top" },
-      h("button", { class: "icon", "aria-label": "设置", onclick: () => openSettings("root") }, icon("gear")),
-      h("div", { class: "title" }, h("b", { id: "lampname" }, "WLED"), h("small", { id: "lampip" })),
-      h("label", { class: "switch act", "aria-label": "电源" },
-        h("input", { type: "checkbox", id: "power", onchange: (e) => send({ on: e.target.checked }) }), h("span"))),
-    h("div", { id: "banner", hidden: true }, "已断开，正在重连…"),
+    h("div", { class: "head" },
+      h("header", { class: "top" },
+        h("button", { class: "icon", "aria-label": "设置", onclick: () => openSettings("root") }, icon("gear")),
+        h("div", { class: "title" }, h("b", { id: "lampname" }, "WLED"), h("small", { id: "lampip" })),
+        h("label", { class: "switch act", "aria-label": "电源" },
+          h("input", { type: "checkbox", id: "power", onchange: (e) => send({ on: e.target.checked }) }), h("span"))),
+      h("div", { id: "banner", hidden: true }, "已断开，正在重连…")),
     h("main", { id: "main" }),
     h("nav", { id: "tabs" }, [["fixed", "固定灯效"], ["lighting", "照明"], ["music", "音乐律动"]].map(([t, title]) =>
       h("button", { dataset: { tab: t }, onclick: () => { S.tab = t; renderMain(); } }, icon(t), h("span", null, title)))),
@@ -313,12 +353,14 @@ function novaList() {
 function wledPanel() {
   const input = h("input", { type: "search", class: "filter", placeholder: "筛选效果（中英文均可）", value: S.wledFilter });
   const box = h("div", { class: "list", dataset: { list: "wled" } });
+  let first = true;
   const fill = () => {
     const list = L.wledEffects(S.effects, S.fxdata, S.nova, S.wledFilter);
     box.replaceChildren(...list.map((e) => row({ k: String(e.index), title: L.effectDisplay(e.name), onclick: () => send({ seg: [{ id: segId(), fx: e.index }] }) })));
     if (!list.length) box.append(h("div", { class: "empty" }, "没有匹配的效果"));
-    delete box.dataset.cur;
-    syncList(box);
+    // 首次填充时盒子还没挂上页面，滚不动；交给挂载后的 update() 去定位。之后（筛选）才重新对一次
+    if (!first) { delete box.dataset.cur; syncList(box); }
+    first = false;
   };
   input.addEventListener("input", () => { S.wledFilter = input.value; fill(); });
   fill();
@@ -445,7 +487,13 @@ function updateNightlight() {
 
 // ── 设置 ──
 
-function openSettings(page) { S.page = page; renderSettings(); }
+const LOADING = () => h("div", { class: "empty" }, "正在读取…");
+
+function openSettings(page) {
+  S.page = page;
+  renderSettings();
+  if (page === "presets") loadPresets().then(() => { if (S.page === "presets") renderSettings(); });
+}
 
 function renderSettings() {
   const box = $("settings");
@@ -487,21 +535,32 @@ function settingsRoot() {
 
 function presetsPage() {
   const name = h("input", { type: "text", class: "filter", placeholder: "预设名称" });
-  const save = () => {
+  const save = async () => {
+    await loadPresets();                      // 选槽位前现读一遍，读不出来就不存，免得盖掉已有预设
+    if (!S.presets) { renderSettings(); return; }
     const id = L.nextFreeSlot(S.presets);
     send({ psave: id, n: name.value.trim() || `预设 ${id}` });
+    name.value = "";
     reloadPresets();
   };
   const del = (p) => { if (confirm(`删除预设「${p.name}」？`)) { send({ pdel: p.id }); reloadPresets(); } };
+  const cur = S.state && S.state.ps;
+  let list;
+  if (S.presets) {
+    list = S.presets.length
+      ? S.presets.map((p) => h("div", { class: p.id === cur ? "row on" : "row" },
+          h("button", { class: "t act", style: "text-align:left", onclick: () => send({ ps: p.id }) }, `${p.id}. ${p.name}`),
+          p.isPlaylist ? h("small", null, "播放列表") : null,
+          h("span", { class: "ck" }, "✓"),
+          h("button", { class: "btn danger act", onclick: () => del(p) }, "删除")))
+      : h("div", { class: "empty" }, "还没有预设");
+  } else {
+    list = S.presetsError ? h("div", { class: "empty" }, "预设列表读不出来，稍后再试") : LOADING();
+  }
   return [
     h("div", { class: "line act", style: "margin-top:12px" }, name, h("button", { class: "btn", onclick: save }, "存当前状态")),
     h("p", { class: "note", style: "margin:8px 4px" }, "存的是灯现在的状态。播放列表请在经典界面编辑。"),
-    h("div", { class: "group" }, S.presets.length
-      ? S.presets.map((p) => h("div", { class: "row" },
-          h("button", { class: "t act", style: "text-align:left", onclick: () => send({ ps: p.id }) }, `${p.id}. ${p.name}`),
-          p.isPlaylist ? h("small", null, "播放列表") : null,
-          h("button", { class: "btn danger act", onclick: () => del(p) }, "删除")))
-      : h("div", { class: "empty" }, "还没有预设")),
+    h("div", { class: "group" }, list),
   ];
 }
 async function reloadPresets() {
@@ -511,6 +570,7 @@ async function reloadPresets() {
 }
 
 function segmentsPage() {
+  if (!S.state) return LOADING();
   const segs = S.state.seg || [];
   const apply = (t) => { if (confirm(`按「${t.name}」重新分区？现有分段会被替换。`)) send(L.templatePatch(t, S.state, S.effects, S.nova)); };
   return [
@@ -532,7 +592,8 @@ function fmtUptime(s) {
   return `${d ? `${d} 天 ` : ""}${hr} 小时 ${m} 分`;
 }
 function infoPage() {
-  const i = S.info || {};
+  if (!S.info) return LOADING();
+  const i = S.info;
   const w = i.wifi || {};
   const rows = [
     ["名称", i.name], ["版本", i.ver], ["IP", i.ip],
@@ -543,7 +604,7 @@ function infoPage() {
     ["灯珠", i.leds && i.leds.count],
   ];
   // usermod 报的条目（含原厂板的「Wi-Fi 诊断」「讯飞云」），值可能带 HTML
-  const um = Object.entries(i.u || {}).map(([k, v]) => [k, (Array.isArray(v) ? v : [v]).map(plain).join(" ")]);
+  const um = Object.entries(i.u || {}).map(([k, v]) => [k, (Array.isArray(v) ? v : [v]).map((x) => plain(x).replace(/\s+/g, " ").trim()).filter(Boolean).join(" ")]);
   return h("div", { class: "group", style: "margin-top:12px" }, rows.concat(um)
     .filter(([, v]) => v != null && v !== "")
     .map(([k, v]) => h("div", { class: "row kv" }, h("span", null, k), h("b", null, String(v)))));
@@ -551,25 +612,42 @@ function infoPage() {
 
 // ── 启动 ──
 
+// /nova 缺字段（版本不匹配、被别的服务顶替）时当作没有，免得讯飞入口渲染到一半抛错
+function novaOrNull(n) {
+  const ok = n && n.scene && n.music && Array.isArray(n.scene.names) && Array.isArray(n.scene.categories) && Array.isArray(n.music.names)
+    && typeof n.scene.fx === "number" && typeof n.music.fx === "number";
+  if (n && !ok) console.warn("/nova 缺少 scene / music 数组，忽略讯飞入口", n);
+  return ok ? n : null;
+}
+
+async function loadBase() {
+  const b = await getJson("/json");
+  const [fx, nova] = await Promise.all([
+    getJson("/json/fxdata").catch(() => []),
+    getJson("/nova").then(novaOrNull).catch(() => null),        // 自制板没有：讯飞相关入口整个不显示
+  ]);
+  return { b, fx, nova };
+}
+
 async function boot() {
   shell();
-  try {
-    const [b, fx, nova] = await Promise.all([
-      getJson("/json"),
-      getJson("/json/fxdata").catch(() => []),
-      getJson("/nova").catch(() => null),        // 自制板没有：讯飞相关入口整个不显示
-    ]);
-    Object.assign(S, { info: b.info, effects: b.effects || [], palettes: b.palettes || [], fxdata: fx, nova });
-    S.state = b.state;
-    S.lampMode = S.tab = L.mode(b.state, S.effects);
-    S.lampKind = S.kind = L.fixedKind(b.state, nova);
-    markOk();
-    renderMain();
-  } catch (_) {
-    setOnline(false);
-    setTimeout(() => location.reload(), 3000);
-    return;
+  let base;
+  for (let wait = 2000; ; wait = Math.min(wait * 2, 10000)) {
+    try { base = await loadBase(); break; }
+    catch (_) { setOnline(false); await new Promise((r) => setTimeout(r, wait)); }
   }
+  const { b, fx, nova } = base;
+  Object.assign(S, { info: b.info, effects: b.effects || [], palettes: b.palettes || [], fxdata: fx, nova });
+  S.state = b.state;
+  S.lampMode = S.tab = L.mode(b.state, S.effects);
+  S.lampKind = S.kind = L.fixedKind(b.state, nova);
+  markOk();
+  try { renderMain(); }
+  catch (e) {                                  // 渲染出错不是「离线」：留一行可见的提示和控制台堆栈，不重载
+    console.error(e);
+    $("main").replaceChildren(h("div", { class: "empty" }, "页面渲染出错，详情见浏览器控制台"));
+  }
+  if (S.page) renderSettings();
   connectWs();
   setInterval(poll, 3000);
   loadPalx();

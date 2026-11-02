@@ -1,3 +1,4 @@
+/* 目标 iOS Safari 14.1+（flex gap 需要 14.1） */
 /* 新首页样式。配色取 Material 3 基线色板（Android App 用的同一套），跟随系统深浅色 */
 :root{--p:#6750a4;--op:#fff;--pc:#eaddff;--bg:#fef7ff;--sf:#f3edf7;--sv:#e7e0ec;--on:#1d1b20;--onv:#49454f;--ol:#79747e;--er:#b3261e;color-scheme:light dark}
 @media (prefers-color-scheme:dark){:root{--p:#d0bcff;--op:#381e72;--pc:#4f378b;--bg:#141218;--sf:#211f26;--sv:#49454f;--on:#e6e0e9;--onv:#cac4d0;--ol:#938f99;--er:#f2b8b5}}
@@ -6,6 +7,8 @@ html,body{margin:0;background:var(--bg);color:var(--on);font:15px/1.4 -apple-sys
 body{max-width:640px;margin:0 auto;padding-bottom:calc(72px + env(safe-area-inset-bottom))}
 button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
 a{color:inherit}
+.head{position:sticky;top:0;z-index:5;background:var(--bg)}
+.head .top{position:static}
 .top{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg)}
 .top .title{flex:1;min-width:0;text-align:center;display:flex;flex-direction:column}
 .top .title b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -62,7 +65,7 @@ input[type=color]{width:44px;height:32px;border:0;background:none;padding:0}
 .bars i{flex:1;background:var(--p);border-radius:2px 2px 0 0;height:0;transition:height .15s}
 .switch{position:relative;width:52px;height:32px;flex:none}
 .switch input{opacity:0;width:0;height:0;position:absolute}
-.switch span{position:absolute;inset:0;border-radius:16px;background:var(--sv);transition:.2s}
+.switch span{position:absolute;top:0;right:0;bottom:0;left:0;border-radius:16px;background:var(--sv);transition:.2s}
 .switch span::after{content:"";position:absolute;left:4px;top:4px;width:24px;height:24px;border-radius:50%;background:var(--ol);transition:.2s}
 .switch input:checked+span{background:var(--p)}
 .switch input:checked+span::after{left:24px;background:var(--op)}
@@ -71,7 +74,7 @@ input[type=color]{width:44px;height:32px;border:0;background:none;padding:0}
 #tabs .ic{padding:2px 16px;width:56px;height:28px;border-radius:14px}
 #tabs button.on{color:var(--on)}
 #tabs button.on .ic{background:var(--pc)}
-#settings{position:fixed;inset:0;z-index:10;background:var(--bg);overflow-y:auto}
+#settings{position:fixed;top:0;right:0;bottom:0;left:0;z-index:10;background:var(--bg);overflow-y:auto}
 #settings .top{max-width:640px;margin:0 auto}
 #settings .page{max-width:640px;margin:0 auto;padding:0 16px 24px}
 #settings h3{font-size:13px;color:var(--onv);font-weight:500;margin:18px 4px 6px}
