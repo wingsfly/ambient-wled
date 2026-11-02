@@ -643,7 +643,7 @@ void initServer()
     if (u == "/classic") {
       handleStaticContent(request, "", 200, FPSTR(CONTENT_TYPE_HTML), PAGE_index, PAGE_index_length);
     } else if (u == "/classic/") {
-      request->redirect(F("../classic"));
+      request->redirect("../classic");
     } else {
       request->send(404, FPSTR(CONTENT_TYPE_PLAIN), FPSTR(s_not_found));
     }
