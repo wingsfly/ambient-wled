@@ -30,7 +30,7 @@ function h(tag, props, ...kids) {
     else if (k in el && typeof v !== "string") el[k] = v;
     else el.setAttribute(k, v === true ? "" : v);
   }
-  for (const c of kids.flat()) if (c != null && c !== false) el.append(c.nodeType ? c : String(c));
+  for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(c.nodeType ? c : String(c));
   return el;
 }
 
@@ -326,7 +326,7 @@ function shell() {
 function renderMain() {
   const body = { fixed: fixedTab, lighting: lightingTab, music: musicTab }[S.tab]();
   S.palShown = palVisible();
-  $("main").replaceChildren(h("div", { class: "card" }, slider("bri", "亮度", 1, 255)), ...[body].flat().filter(Boolean), nightlight());
+  $("main").replaceChildren(h("div", { class: "card" }, slider("bri", "亮度", 1, 255)), ...[body].flat(Infinity).filter(Boolean), nightlight());
   update();
   if (S.tab === "music") startMeters();
 }
