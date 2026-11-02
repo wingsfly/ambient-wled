@@ -467,9 +467,10 @@ private struct PaletteGallery: View {
     let segColors: [[Int]]?
     /// 打开中的编辑窗（新建 / 编辑 / 复制为新的）。
     @State private var editing: PaletteDraft?
-    /// 等待确认删除的自定义调色板。
-    @State private var deleting: PaletteChoice?
-    @State private var message: String?
+    /// 删除确认与提示共用一个 alert：同一视图上挂多个 .alert，SwiftUI 常常只认最后一个。
+    @State private var alert: GalleryAlert?
+    /// 编辑窗关闭前交出来的提示，等它关完再显示（sheet 还在时弹 alert 可能被吞掉）。
+    @State private var pendingReport: String?
     /// 正在读文件准备打开编辑窗，防止连点。
     @State private var loading = false
 
@@ -495,22 +496,45 @@ private struct PaletteGallery: View {
                 .onChange(of: current) { _, id in withAnimation { proxy.scrollTo(id, anchor: .center) } }
             }
         }
-        .sheet(item: $editing) { d in
-            ConsolePaletteEditor(draft: d) { message = $0 }
+        .sheet(item: $editing, onDismiss: {
+            if let m = pendingReport { pendingReport = nil; alert = .message(m) }
+        }) { d in
+            ConsolePaletteEditor(draft: d) { pendingReport = $0 }
                 .environmentObject(model)
         }
-        .alert("删除调色板", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
-               presenting: deleting) { p in
-            Button("删除", role: .destructive) {
-                guard let index = p.index else { return }
-                Task { message = await model.deletePalette(index: index) }
+        .alert(alert?.title ?? "", isPresented: Binding(get: { alert != nil }, set: { if !$0 { alert = nil } }),
+               presenting: alert) { a in
+            switch a {
+            case .confirmDelete(let p):
+                Button("删除", role: .destructive) {
+                    guard let index = p.index else { return }
+                    Task { if let m = await model.deletePalette(index: index) { alert = .message(m) } }
+                }
+                Button("取消", role: .cancel) {}
+            case .message:
+                Button("好") {}
             }
-            Button("取消", role: .cancel) {}
-        } message: { p in
-            Text("删除「\(p.title)」？其他自定义调色板的编号不变。")
+        } message: { a in
+            if case .confirmDelete(let p) = a {
+                Text("删除「\(p.title)」？其他自定义调色板的编号不变。")
+            }
         }
-        .alert(message ?? "", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
-            Button("好") {}
+    }
+
+    private enum GalleryAlert: Identifiable {
+        case confirmDelete(PaletteChoice)
+        case message(String)
+        var id: String {
+            switch self {
+            case .confirmDelete(let p): return "delete-\(p.id)"
+            case .message(let m): return "message-\(m)"
+            }
+        }
+        var title: String {
+            switch self {
+            case .confirmDelete: return "删除调色板"
+            case .message(let m): return m
+            }
         }
     }
 
@@ -538,7 +562,7 @@ private struct PaletteGallery: View {
         Task {
             defer { loading = false }
             guard let e = await model.paletteStops(forEdit: index) else {
-                message = "读不出这个调色板的色标"
+                alert = .message("读不出这个调色板的色标")
                 return
             }
             let name = e.name ?? model.customPalettes.first { $0.index == index }?.name ?? ""
@@ -574,7 +598,7 @@ private struct PaletteGallery: View {
                 Button("编辑") { open(p, copy: false) }
                 Button("复制为新的") { open(p, copy: true) }
                 Divider()
-                Button("删除", role: .destructive) { deleting = p }
+                Button("删除", role: .destructive) { alert = .confirmDelete(p) }
             }
         }
     }
