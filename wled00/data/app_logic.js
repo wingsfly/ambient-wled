@@ -5,7 +5,8 @@
   "use strict";
   const f = Math.fround;
 
-  // ── 原厂白光：与固件 nova_light.h 同一公式。每步 fround 模拟 Swift 的 Float，边界上的舍入才一致 ──
+  // ── 原厂白光：与固件 nova_light.h 同一公式。每次乘、除、加减都舍入到 Float（Math.fround），与 Swift 的 Float 逐步一致；
+  //    最后的 +0.5 再取整，在夹紧后的取值范围里是安全的（0..1000 逐个与 Swift 对过）──
   function vendorWhite(cw) {
     const t = f(Math.max(0, Math.min(1000, cw)));
     let s = f(f(f(655 - f(f(877 * t) / 1e3)) + f(f(f(502 * t) * t) / 1e6)) - f(f(f(f(165 * t) * t) * t) / 1e9));
@@ -27,7 +28,7 @@
   function hsvFull(h) {
     const fr = (h % 60) / 60;
     const q = Math.trunc(255 * (1 - fr) + 0.5), t = Math.trunc(255 * fr + 0.5);
-    switch (Math.floor(h / 60)) {
+    switch (Math.trunc(h / 60)) {
       case 0: return [255, t, 0];
       case 1: return [q, 255, 0];
       case 2: return [0, 255, t];
@@ -40,8 +41,9 @@
     .map(([name, h]) => ({ name, rgb: hsvFull(h) }));
 
   // ── ♪ 讯飞音乐：固件把 c1 的 0–255 均分成 N 档 ──
-  function musicIndex(c1, count) { return count > 0 ? Math.max(0, Math.min(count - 1, Math.floor((c1 * count) / 256))) : 0; }
-  function musicC1(index, count) { return count > 0 ? Math.floor((index * 256) / count) + Math.floor(128 / count) : 0; }
+  // 除法取整用 Math.trunc：Swift 的 Int 除法向零截断（负数输入时与 Math.floor 不同）
+  function musicIndex(c1, count) { return count > 0 ? Math.max(0, Math.min(count - 1, Math.trunc((c1 * count) / 256))) : 0; }
+  function musicC1(index, count) { return count > 0 ? Math.trunc((index * 256) / count) + Math.trunc(128 / count) : 0; }
 
   const NOVA_CATEGORY = { basic: "基础", natural: "自然", festival: "节日", life: "生活", funny: "趣味", emotion: "情绪", ambient: "氛围" };
   function novaCategoryTitle(code) { return NOVA_CATEGORY[code] || code; }
@@ -49,10 +51,12 @@
   const MUSIC_FILTERS = [{ id: "nova", title: "讯飞" }].concat(Object.keys(CATEGORY_TITLE).map((c) => ({ id: c, title: CATEGORY_TITLE[c] })));
 
   function isMusic(name) { return typeof name === "string" && name.startsWith("♪"); }
-  function doc(name) { return (name && NAMES.docs[name.trim()]) || null; }
+  // 查表一律用 Object.hasOwn：效果名叫 constructor / __proto__ 时不能取到原型上的东西
+  const own = (table, key) => (Object.hasOwn(table, key) ? table[key] : null);
+  function doc(name) { return name ? own(NAMES.docs, name.trim()) : null; }
   function docCategories(name) { const d = doc(name); return d ? d.c : ""; }
   // 「Rainbow - 彩虹」；没有中文的（讯飞的两个效果本身就是中文）原样
-  function effectDisplay(name) { const zh = NAMES.effects[name]; return zh ? `${name} - ${zh}` : name; }
+  function effectDisplay(name) { const zh = own(NAMES.effects, name); return zh != null ? `${name} - ${zh}` : name; }
 
   // ── 当前模式 ──
   function primary(state) { return (state && state.seg && state.seg[0]) || null; }
@@ -85,6 +89,8 @@
     return parts.length > 3 ? parts[3] : "";
   }
 
+  // 搜索用 toLowerCase().includes：与 Swift 的 localizedCaseInsensitiveContains 只在非 ASCII 的大小写折叠 / 规范化上不同
+  // （Swift 的结果本身随区域设置变），接受这个差别。
   // 固定灯效里的 WLED 原生效果：去掉纯色、♪ 效果、讯飞的两个效果、依赖音频的（v / f）和只有 2D 的
   function wledEffects(effects, fxData, nova, filter) {
     const skip = new Set([0, nova ? nova.scene.fx : -1, nova ? nova.music.fx : -1]);
@@ -131,18 +137,19 @@
   // 讯飞调色板的中文取 /nova 里同名场景（「英文 - 中文」）的中文
   const NOVA_PAL = "讯飞: ";
   function paletteChoices(palettes, umpalnames, nova) {
-    const sceneZh = {};
+    const sceneZh = Object.create(null);
     for (const [name] of nova ? nova.scene.names : []) {
       const parts = name.split(" - ");
       if (parts.length >= 2) sceneZh[parts[0]] = parts.slice(1).join(" - ");
     }
     const um = (umpalnames || []).map((n, j) => {
-      const zh = n.startsWith(NOVA_PAL) && sceneZh[n.slice(NOVA_PAL.length)] ? `讯飞 · ${sceneZh[n.slice(NOVA_PAL.length)]}` : null;
-      return { id: 255 - j, name: n, zh, title: zh || n };
+      const scene = n.startsWith(NOVA_PAL) ? sceneZh[n.slice(NOVA_PAL.length)] : undefined;
+      const zh = scene != null ? `讯飞 · ${scene}` : null;
+      return { id: 255 - j, name: n, zh, title: zh != null ? zh : n };
     });
     const builtin = palettes.map((n, i) => {
-      const zh = NAMES.palettes[n] || null;
-      return { id: i, name: n, zh, title: zh || n };
+      const zh = own(NAMES.palettes, n);
+      return { id: i, name: n, zh, title: zh != null ? zh : n };
     });
     return um.concat(builtin);
   }
@@ -150,6 +157,7 @@
   // 预览色标 [位置 0–1, RGB]。/json/palx 给色标就照搬；给记号就均匀铺开：c1–c3 取段当前颜色，
   // r 是随机色，按编号取固定一组（与 Swift 同一个 64 位 LCG），免得每次重绘都变
   const DEFAULT_SEG_COLORS = [[255, 160, 0], [0, 0, 0], [0, 0, 0]];
+  // 需要 ES2020 的 BigInt（Safari 14+、Chrome 67+），打开灯网页的手机和电脑都满足
   const M64 = (1n << 64n) - 1n;
   function paletteStops(raw, segColors, id) {
     let rng = ((BigInt.asUintN(64, BigInt(id)) * 0x9e3779b97f4a7c15n) & M64) | 1n;
@@ -190,12 +198,14 @@
   function presetsFrom(obj) {
     const out = [];
     for (const [key, v] of Object.entries(obj || {})) {
+      // 与 Swift 的 Int(key) 一样只认十进制数字（可带 +），不认空白、小数点、指数、0x
+      if (!/^\+?[0-9]+$/.test(key)) continue;
       const id = Number(key);
-      if (!Number.isInteger(id) || id <= 0 || !v || typeof v !== "object") continue;
-      const isPlaylist = v.playlist != null;
-      const name = v.n ? v.n : null;
+      if (!Number.isSafeInteger(id) || id <= 0 || !v || typeof v !== "object" || Array.isArray(v)) continue;
+      const isPlaylist = Object.hasOwn(v, "playlist");   // 值是 null 也算（Swift 里 NSNull 不是 nil）
+      const name = typeof v.n === "string" && v.n !== "" ? v.n : null;
       if (name == null && !isPlaylist) continue;
-      out.push({ id, name: name || `播放列表 ${id}`, isPlaylist, quickLabel: v.ql || null });
+      out.push({ id, name: name != null ? name : `播放列表 ${id}`, isPlaylist, quickLabel: typeof v.ql === "string" ? v.ql : null });
     }
     return out.sort((a, b) => a.id - b.id);
   }
@@ -260,4 +270,8 @@
   root.LampLogic = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof window !== "undefined" ? window : globalThis,
-   typeof APP_NAMES !== "undefined" ? APP_NAMES : require("./app_names.js"));
+   (function () {
+     if (typeof APP_NAMES !== "undefined") return APP_NAMES;
+     if (typeof require === "function") return require("./app_names.js");
+     throw new Error("app_names.js 须在 app_logic.js 之前加载");
+   })());
