@@ -4,6 +4,7 @@
   #include "ota_update.h"  
 #endif
 #include "html_ui.h"
+#include "html_app.h"
 #include "html_settings.h"
 #include "html_other.h"
 #include "js_iro.h"
@@ -621,13 +622,21 @@ void initServer()
   });
 #endif
 
+  // lamp：首页换成与 App 同一布局的新界面（data/app.htm），经典界面原样留在 /classic。
+  // 文件系统里的 /index.htm 仍优先，用户自定义首页的能力不丢；?sliders 是经典界面的参数，转给它。
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (captivePortal(request)) return;
-    if (!showWelcomePage || request->hasArg(F("sliders"))) {
-      handleStaticContent(request, F("/index.htm"), 200, FPSTR(CONTENT_TYPE_HTML), PAGE_index, PAGE_index_length);
+    if (request->hasArg(F("sliders"))) {
+      handleStaticContent(request, "", 200, FPSTR(CONTENT_TYPE_HTML), PAGE_index, PAGE_index_length);
+    } else if (!showWelcomePage) {
+      handleStaticContent(request, F("/index.htm"), 200, FPSTR(CONTENT_TYPE_HTML), PAGE_app, PAGE_app_length);
     } else {
       serveSettings(request);
     }
+  });
+
+  server.on(F("/classic"), HTTP_GET, [](AsyncWebServerRequest *request) {
+    handleStaticContent(request, "", 200, FPSTR(CONTENT_TYPE_HTML), PAGE_index, PAGE_index_length);
   });
 
 #ifndef WLED_DISABLE_2D
