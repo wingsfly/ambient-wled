@@ -16,7 +16,7 @@ small,.note,.top small{color:var(--onv);font-size:12px}
 .note{margin:0}
 .icon{width:40px;height:40px;border-radius:20px;display:grid;place-items:center}
 .ic{width:24px;height:24px;fill:currentColor}
-#banner{background:var(--sv);color:var(--onv);padding:6px 16px;font-size:13px}
+.banner{background:var(--sv);color:var(--onv);padding:6px 16px;font-size:13px}
 main{padding:0 16px;display:flex;flex-direction:column;gap:14px}
 .card{background:var(--sf);border-radius:16px;padding:12px;display:flex;flex-direction:column;gap:10px}
 .slider{display:grid;grid-template-columns:3.5em 1fr 2.5em;align-items:center;gap:8px}

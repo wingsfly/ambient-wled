@@ -13,7 +13,7 @@ const S = {
   tab: "fixed", lampMode: null, kind: "solid", lampKind: null, palShown: false,
   novaCat: null, wledFilter: "", musicFilter: null,
   page: null,                       // 设置页：null 关闭；"root" / "presets" / "segments" / "info"
-  ws: null, wsTimer: null, lastMsg: 0, online: true, lastOk: 0,
+  ws: null, wsTimer: null, lastMsg: 0, lastTick: 0, saving: false, online: true, lastOk: 0,
 };
 const $ = (id) => document.getElementById(id);
 
@@ -59,18 +59,24 @@ const plain = (s) => new DOMParser().parseFromString(String(s), "text/html").bod
 
 // ── 收发 ──
 
-async function getJson(url) {
-  const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) throw new Error(`${url} ${r.status}`);
-  return r.json();
+// 请求带超时（含读完响应体）：灯半死不活时别让请求一直挂着；超时按失败算。
+// /json 与 /presets.json 体积大，给 10 秒，其余 4 秒。
+async function fetchJson(url, opts, ms) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms);
+  try {
+    const r = await fetch(url, { ...opts, signal: ctl.signal });
+    if (!r.ok) throw new Error(`${url} ${r.status}`);
+    return await r.json();
+  } finally { clearTimeout(t); }
 }
+const getJson = (url, ms = 4000) => fetchJson(url, { cache: "no-store" }, ms);
 
 const wsLive = () => S.ws && S.ws.readyState === WebSocket.OPEN;
 
 function send(patch) {
   if (wsLive()) { S.ws.send(JSON.stringify(patch)); return; }
-  fetch("/json/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...patch, v: true }) })
-    .then((r) => { if (!r.ok) throw new Error(`state ${r.status}`); return r.json(); })
+  fetchJson("/json/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...patch, v: true }) }, 4000)
     .then((st) => { if (st && "on" in st) applyState(st); markOk(); })
     .catch(markFail);
 }
@@ -85,6 +91,8 @@ function connectWs() {
   try { ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`); }
   catch (e) { scheduleWs(); return; }
   S.ws = ws;
+  // 5 秒还没连上（半开、被代理吞掉）就放弃这条，稍后重来
+  setTimeout(() => { if (S.ws === ws && ws.readyState === WebSocket.CONNECTING) dropWs(false); }, 5000);
   ws.onopen = () => { S.lastMsg = Date.now(); markOk(); };
   ws.onmessage = (e) => {
     S.lastMsg = Date.now();
@@ -98,20 +106,25 @@ function connectWs() {
   ws.onclose = () => { if (S.ws === ws) { S.ws = null; scheduleWs(); } };
 }
 // 半开的连接（灯断电、Wi-Fi 切换）不会触发 onclose：自己判死，摘掉回调、直接换路
-function dropWs() {
+function dropWs(immediate) {
   const ws = S.ws;
   S.ws = null;
   if (ws) { ws.onopen = ws.onmessage = ws.onclose = null; try { ws.close(); } catch (_) { /* 已经死了 */ } }
-  scheduleWs();
+  if (immediate) connectWs(); else scheduleWs();
 }
 
 async function poll() {
+  const now = Date.now();
+  // 与上一拍隔了 6 秒以上：浏览器把定时器挂起过（手机解锁等），这段「无声」不是连接的错
+  const suspended = S.lastTick > 0 && now - S.lastTick > 6000;
+  S.lastTick = now;
   if (wsLive()) {
-    if (Date.now() - S.lastMsg > 7000) { markFail(); dropWs(); return; }
+    if (suspended) S.lastMsg = now;
+    else if (now - S.lastMsg > 7000) { markFail(); dropWs(true); return; }
     try { S.ws.send("p"); } catch (_) { /* 下一拍再判 */ }
     return;
   }
-  try { applyState(await getJson("/json/state")); markOk(); } catch (_) { markFail(); }
+  try { applyState(await getJson("/json/state")); markOk(); } catch (_) { if (!suspended) markFail(); }
 }
 // 回到前台时立即对一次：后台期间定时器和 /ws 都可能被系统挂起
 document.addEventListener("visibilitychange", () => {
@@ -125,7 +138,7 @@ function markFail() { if (Date.now() - S.lastOk > 6000) setOnline(false); }
 function setOnline(on) {
   if (S.online === on) return;
   S.online = on;
-  $("banner").hidden = on;
+  document.querySelectorAll(".banner").forEach((el) => { el.hidden = on; });
   document.body.classList.toggle("offline", !on);
 }
 
@@ -141,7 +154,7 @@ async function loadPalx() {
 
 // 读失败（presets = null）与「确实没有预设」（[]）必须分开：把失败当空列表会让「存当前状态」去覆盖 1 号预设
 async function loadPresets() {
-  try { S.presets = L.presetsFrom(await getJson("/presets.json")); S.presetsError = false; }
+  try { S.presets = L.presetsFrom(await getJson("/presets.json", 10000)); S.presetsError = false; }
   catch (_) { S.presets = null; S.presetsError = true; }
 }
 
@@ -170,6 +183,7 @@ function applyState(st) {
   if (palVisible() !== S.palShown) rerender = true;
   if (rerender) renderMain(); else update();
   if (S.page === "segments") renderSettings();
+  else if (S.page === "presets") syncPresetMarks();
 }
 
 // 只同步数值与选中项，不重建 DOM（拖动中的滑块、列表滚动位置都不动）
@@ -218,6 +232,8 @@ function slider(key, label, min = 0, max = 255) {
     if (timer) clearTimeout(timer);
     push();
   };
+  // 鼠标拖出滑块再松手时 pointerup 落在别处：在文档上补一个一次性的
+  inp.addEventListener("pointerdown", () => document.addEventListener("pointerup", end, { once: true }));
   inp.addEventListener("input", () => {
     inp.dataset.drag = "1";
     out.textContent = inp.value;
@@ -300,7 +316,7 @@ function shell() {
         h("div", { class: "title" }, h("b", { id: "lampname" }, "WLED"), h("small", { id: "lampip" })),
         h("label", { class: "switch act", "aria-label": "电源" },
           h("input", { type: "checkbox", id: "power", onchange: (e) => send({ on: e.target.checked }) }), h("span"))),
-      h("div", { id: "banner", hidden: true }, "已断开，正在重连…")),
+      h("div", { id: "banner", class: "banner", hidden: true }, "已断开，正在重连…")),
     h("main", { id: "main" }),
     h("nav", { id: "tabs" }, [["fixed", "固定灯效"], ["lighting", "照明"], ["music", "音乐律动"]].map(([t, title]) =>
       h("button", { dataset: { tab: t }, onclick: () => { S.tab = t; renderMain(); } }, icon(t), h("span", null, title)))),
@@ -508,8 +524,10 @@ function renderSettings() {
   const titles = { root: "设置", presets: "预设", segments: "分区", info: "设备信息" };
   const body = { root: settingsRoot, presets: presetsPage, segments: segmentsPage, info: infoPage }[S.page]();
   box.replaceChildren(
-    h("header", { class: "top" }, h("button", { class: "icon", "aria-label": "返回", onclick: back }, icon("back")),
-      h("div", { class: "title" }, h("b", null, titles[S.page])), h("span", { class: "icon" })),
+    h("div", { class: "head" },
+      h("header", { class: "top" }, h("button", { class: "icon", "aria-label": "返回", onclick: back }, icon("back")),
+        h("div", { class: "title" }, h("b", null, titles[S.page])), h("span", { class: "icon" })),
+      h("div", { class: "banner", hidden: S.online }, "已断开，正在重连…")),
     h("div", { class: "page" }, body));
 }
 
@@ -533,22 +551,38 @@ function settingsRoot() {
   ];
 }
 
+// 灯上切了预设，设置页里的 ✓ 跟着走；只改 class，不重建，名称框里写到一半的字不丢
+function syncPresetMarks() {
+  const ps = S.state && S.state.ps;
+  document.querySelectorAll("#settings [data-pid]").forEach((el) => el.classList.toggle("on", Number(el.dataset.pid) === ps));
+}
+
 function presetsPage() {
   const name = h("input", { type: "text", class: "filter", placeholder: "预设名称" });
+  const btn = h("button", { class: "btn", disabled: S.saving, onclick: () => save() }, "存当前状态");
+  // 存的过程中按钮置灰（到重读完为止），连点两下不会两次选到同一个槽位
   const save = async () => {
-    await loadPresets();                      // 选槽位前现读一遍，读不出来就不存，免得盖掉已有预设
-    if (!S.presets) { renderSettings(); return; }
-    const id = L.nextFreeSlot(S.presets);
-    send({ psave: id, n: name.value.trim() || `预设 ${id}` });
-    name.value = "";
-    reloadPresets();
+    if (S.saving) return;
+    S.saving = true;
+    btn.disabled = true;
+    try {
+      await loadPresets();                    // 选槽位前现读一遍，读不出来就不存，免得盖掉已有预设
+      if (S.presets) {
+        const id = L.nextFreeSlot(S.presets);
+        send({ psave: id, n: name.value.trim() || `预设 ${id}` });
+        name.value = "";
+        await new Promise((r) => setTimeout(r, 600));    // 等灯写完 presets.json
+        await loadPresets();
+      }
+    } finally { S.saving = false; }
+    if (S.page === "presets") renderSettings();
   };
   const del = (p) => { if (confirm(`删除预设「${p.name}」？`)) { send({ pdel: p.id }); reloadPresets(); } };
   const cur = S.state && S.state.ps;
   let list;
   if (S.presets) {
     list = S.presets.length
-      ? S.presets.map((p) => h("div", { class: p.id === cur ? "row on" : "row" },
+      ? S.presets.map((p) => h("div", { class: p.id === cur ? "row on" : "row", dataset: { pid: String(p.id) } },
           h("button", { class: "t act", style: "text-align:left", onclick: () => send({ ps: p.id }) }, `${p.id}. ${p.name}`),
           p.isPlaylist ? h("small", null, "播放列表") : null,
           h("span", { class: "ck" }, "✓"),
@@ -558,7 +592,7 @@ function presetsPage() {
     list = S.presetsError ? h("div", { class: "empty" }, "预设列表读不出来，稍后再试") : LOADING();
   }
   return [
-    h("div", { class: "line act", style: "margin-top:12px" }, name, h("button", { class: "btn", onclick: save }, "存当前状态")),
+    h("div", { class: "line act", style: "margin-top:12px" }, name, btn),
     h("p", { class: "note", style: "margin:8px 4px" }, "存的是灯现在的状态。播放列表请在经典界面编辑。"),
     h("div", { class: "group" }, list),
   ];
@@ -621,7 +655,7 @@ function novaOrNull(n) {
 }
 
 async function loadBase() {
-  const b = await getJson("/json");
+  const b = await getJson("/json", 10000);
   const [fx, nova] = await Promise.all([
     getJson("/json/fxdata").catch(() => []),
     getJson("/nova").then(novaOrNull).catch(() => null),        // 自制板没有：讯飞相关入口整个不显示
