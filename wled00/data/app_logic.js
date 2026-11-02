@@ -45,14 +45,15 @@
   function musicIndex(c1, count) { return count > 0 ? Math.max(0, Math.min(count - 1, Math.trunc((c1 * count) / 256))) : 0; }
   function musicC1(index, count) { return count > 0 ? Math.trunc((index * 256) / count) + Math.trunc(128 / count) : 0; }
 
+  // 查表一律只认自己的键（hasOwnProperty，ES5 就有）：名字叫 constructor / __proto__ 时不能取到原型上的东西
+  const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+  const own = (table, key) => (hasOwn(table, key) ? table[key] : null);
   const NOVA_CATEGORY = { basic: "基础", natural: "自然", festival: "节日", life: "生活", funny: "趣味", emotion: "情绪", ambient: "氛围" };
-  function novaCategoryTitle(code) { return NOVA_CATEGORY[code] || code; }
+  function novaCategoryTitle(code) { const t = own(NOVA_CATEGORY, code); return t != null ? t : code; }
   const CATEGORY_TITLE = { B: "节奏", S: "频谱", M: "旋律", V: "人声", D: "氛围" };
   const MUSIC_FILTERS = [{ id: "nova", title: "讯飞" }].concat(Object.keys(CATEGORY_TITLE).map((c) => ({ id: c, title: CATEGORY_TITLE[c] })));
 
   function isMusic(name) { return typeof name === "string" && name.startsWith("♪"); }
-  // 查表一律用 Object.hasOwn：效果名叫 constructor / __proto__ 时不能取到原型上的东西
-  const own = (table, key) => (Object.hasOwn(table, key) ? table[key] : null);
   function doc(name) { return name ? own(NAMES.docs, name.trim()) : null; }
   function docCategories(name) { const d = doc(name); return d ? d.c : ""; }
   // 「Rainbow - 彩虹」；没有中文的（讯飞的两个效果本身就是中文）原样
@@ -202,7 +203,7 @@
       if (!/^\+?[0-9]+$/.test(key)) continue;
       const id = Number(key);
       if (!Number.isSafeInteger(id) || id <= 0 || !v || typeof v !== "object" || Array.isArray(v)) continue;
-      const isPlaylist = Object.hasOwn(v, "playlist");   // 值是 null 也算（Swift 里 NSNull 不是 nil）
+      const isPlaylist = hasOwn(v, "playlist");   // 值是 null 也算（Swift 里 NSNull 不是 nil）
       const name = typeof v.n === "string" && v.n !== "" ? v.n : null;
       if (name == null && !isPlaylist) continue;
       out.push({ id, name: name != null ? name : `播放列表 ${id}`, isPlaylist, quickLabel: typeof v.ql === "string" ? v.ql : null });

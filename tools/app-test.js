@@ -40,8 +40,8 @@ const intArr = (o, key, ctx) => { const v = field(o, key, ctx); need(intList(v),
 const strOrNull = (v, path) => need(v === null || isStr(v), path, "字符串或 null", v);
 const tuple = (r, size, ctx) => { need(Array.isArray(r) && r.length === size, ctx || "行", `${size} 项的数组`, r); return r; };
 
-// 键存在时才检查类型（Swift 的可选字段：缺了是 nil，在了就得类型对）
-const optional = (o, key, ctx, ok, what) => { if (key in o) need(ok(o[key]), at(ctx, key), what, o[key]); };
+// 键存在且不是 null 时才检查类型（Swift 的可选字段：缺了或 JSON null 都解成 nil，有值就得类型对）
+const optional = (o, key, ctx, ok, what) => { if (key in o && o[key] !== null) need(ok(o[key]), at(ctx, key), what, o[key]); };
 const optInt = (o, key, ctx) => optional(o, key, ctx, isInt, "JSON 整数");
 const optBool = (o, key, ctx) => optional(o, key, ctx, isBool, "JSON 布尔");
 const optStr = (o, key, ctx) => optional(o, key, ctx, isStr, "JSON 字符串");
@@ -51,26 +51,33 @@ function checkState(st, ctx) {
   need(isObj(st), ctx, "JSON 对象", st);
   for (const k of ["bri", "ps", "pl"]) optInt(st, k, ctx);
   optBool(st, "on", ctx);
-  if ("seg" in st) {
+  if (st.nl != null) {
+    const nc = at(ctx, "nl");
+    need(isObj(st.nl), nc, "JSON 对象", st.nl);
+    optBool(st.nl, "on", nc);
+    for (const k of ["dur", "mode", "tbri", "rem"]) optInt(st.nl, k, nc);
+  }
+  if (st.seg != null) {
     need(Array.isArray(st.seg), at(ctx, "seg"), "数组", st.seg);
     st.seg.forEach((sg, i) => {
       const sc = `${at(ctx, "seg")}[${i}]`;
       need(isObj(sg), sc, "JSON 对象", sg);
-      for (const k of ["id", "fx", "c1", "sx", "ix", "pal", "start", "stop"]) optInt(sg, k, sc);
-      optBool(sg, "on", sc);
+      // 与 LampKit Models.swift 的 LampSegment 逐个字段对应
+      for (const k of ["id", "start", "stop", "len", "grp", "spc", "of", "bri", "cct", "fx", "sx", "ix", "c1", "pal"]) optInt(sg, k, sc);
+      for (const k of ["on", "frz", "sel", "rev", "mi"]) optBool(sg, k, sc);
       optStr(sg, "n", sc);
-      if ("col" in sg) {
+      if (sg.col != null) {
         need(Array.isArray(sg.col), at(sc, "col"), "数组", sg.col);
         sg.col.forEach((c, j) => need(intList(c), `${at(sc, "col")}[${j}]`, "整数数组", c));
       }
     });
   }
-  if ("nova" in st) {
+  if (st.nova != null) {
     need(isObj(st.nova), at(ctx, "nova"), "JSON 对象", st.nova);
     optBool(st.nova, "white", at(ctx, "nova"));
     optInt(st.nova, "cw", at(ctx, "nova"));
   }
-  if ("lamp" in st) {
+  if (st.lamp != null) {
     need(isObj(st.lamp), at(ctx, "lamp"), "JSON 对象", st.lamp);
     optInt(st.lamp, "src", at(ctx, "lamp"));
   }
@@ -318,6 +325,8 @@ test("预设表：键只认十进制数字；playlist 键在就算（值为 null
 
 test("查表只认自己的键：效果名叫 constructor 之类不取到原型上的东西；空字符串的中文也算有", () => {
   for (const n of ["constructor", "__proto__", "toString", "hasOwnProperty"]) assert.equal(L.effectDisplay(n), n);
+  assert.equal(L.novaCategoryTitle("natural"), "自然");
+  for (const n of ["toString", "constructor", "__proto__", "unknown"]) assert.equal(L.novaCategoryTitle(n), n);
   assert.equal(L.doc("constructor"), null);
   assert.equal(L.doc("__proto__"), null);
   const nova = { scene: { fx: 3, names: [["Ocean - ", 1], ["constructor - 构造", 2]] }, music: { fx: 4, names: [] } };
