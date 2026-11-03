@@ -23,10 +23,13 @@ private func put<T>(_ v: T, _ dst: UnsafeMutableRawPointer, _ off: inout Int) {
 /// 两种包的编码器。
 ///
 /// 布局与 `usermods/lamp/lamp_wled_fx.cpp` 的 `LampSyncPacket` 逐字节对应
-/// （那边有 `static_assert(sizeof(...) == 341)`）。固件按**包长**分 v1/v2，
-/// `version` 字段恒为 1 —— 见 lamp_wled_fx.cpp:772-776，改这里必须同步那边。
+/// （那边有 `static_assert(sizeof(...) == 342)`）。固件按**包长**分 v1/v2/v3，
+/// `version` 字段恒为 1 —— 见 lamp_wled_fx.cpp 的收包循环，改这里必须同步那边。
 final class PacketEncoder: @unchecked Sendable {
-    static let lamp1Size = 341
+    static let lamp1Size = 342
+    /// 发送方优先级（v3 包尾）：Mac 高于手机，两边同时推时灯只认这边，这边静音停发后才轮到手机。
+    /// 与固件 usermods/lamp/lamp_sync.h 的 kSenderDesktop 一致。
+    static let senderPriority: UInt8 = 2
     static let wledV2Size = 44
     static let lamp1Port: UInt16 = 11989
     static let wledV2Port: UInt16 = 11988
@@ -67,7 +70,8 @@ final class PacketEncoder: @unchecked Sendable {
             put(fr.bar_index.littleEndian, d, &o)
             put(valence, d, &o)
             put(emoID, d, &o)
-            assert(o == PacketEncoder.lamp1Size, "LAMP1 写了 \(o) 字节，应为 341")
+            put(PacketEncoder.senderPriority, d, &o)
+            assert(o == PacketEncoder.lamp1Size, "LAMP1 写了 \(o) 字节，应为 342")
         }
     }
 
