@@ -10,6 +10,8 @@ struct ConsoleView: View {
     @StateObject private var model = LampViewModel(appName: "LampSender")
     @State private var page: Page = .control
     @State private var manualHost = ""
+    @State private var editing: LampDevice?
+    @State private var deleting: LampDevice?
     @AppStorage("consoleSidebar") private var showSidebar = true
 
     enum Page: String, CaseIterable, Identifiable {
@@ -84,6 +86,11 @@ struct ConsoleView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("编辑…") { editing = d }
+                        Button("删除…", role: .destructive) { deleting = d }
+                    }
+                    .help("右键可改名字、地址或删除")
                 }
                 // 跨隧道时 mDNS 过不去，手填地址是必备入口而不是兜底
                 HStack(spacing: 4) {
@@ -102,6 +109,14 @@ struct ConsoleView: View {
             }
         }
         .listStyle(.sidebar)
+        .sheet(item: $editing) { d in DeviceEditSheet(device: d).environmentObject(model) }
+        .confirmationDialog("删除「\(deleting?.name ?? "")」？", isPresented: Binding(
+            get: { deleting != nil }, set: { if !$0 { deleting = nil } }
+        ), presenting: deleting) { d in
+            Button("删除", role: .destructive) { model.removeDevice(id: d.id) }
+        } message: { _ in
+            Text("自动发现的灯之后可能会再出现")
+        }
     }
 
     /// 控制台连上了谁、读到了什么。窗口开着时才有意义，ssh 下查：
@@ -206,5 +221,45 @@ struct LabeledSlider: View {
                 .frame(width: 34, alignment: .trailing)
         }
         .onChange(of: value) { dragging = nil }
+    }
+}
+
+/// 改名字和地址。空的不让存；其余错误（重复地址等）由设备簿判定，显示在框下。
+private struct DeviceEditSheet: View {
+    @EnvironmentObject private var model: LampViewModel
+    @Environment(\.dismiss) private var dismiss
+    let device: LampDevice
+    @State private var name = ""
+    @State private var host = ""
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("编辑设备").font(.headline)
+            Form {
+                TextField("名字", text: $name)
+                TextField("地址", text: $host, prompt: Text("IP 或主机名"))
+            }
+            if let error { Text(error).font(.caption).foregroundStyle(.red) }
+            if !device.isManual {
+                Text("改了地址就按手填处理，自动发现不再改写它。").font(.caption).foregroundStyle(.secondary)
+            }
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("保存") {
+                    error = model.renameOrReaddress(id: device.id, name: name, host: host)
+                    if error == nil { dismiss() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty
+                          || host.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 340)
+        .onAppear { name = device.name; host = device.host }
+        .onChange(of: name) { _, _ in error = nil }
+        .onChange(of: host) { _, _ in error = nil }
     }
 }
