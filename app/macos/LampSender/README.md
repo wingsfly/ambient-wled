@@ -40,6 +40,22 @@ defaults read com.hjma.lamp.sender launchAtLoginStatus   # enabled / requiresApp
 构建不需要 XcodeGen 也不需要 SwiftPM —— SwiftPM 的 target 源码不能跳出 package
 目录，而我们要编仓库另一头的 C++。`swiftc` 直接编没有这个限制，有 Xcode 就够。
 
+**要完整的 Xcode，只有 Command Line Tools 不行。** CLT 里没有 SwiftUI 的宏插件，
+`@State` 处处报 `external macro implementation type 'SwiftUIMacros.StateMacro' could
+not be found`（报错落在没改过的文件上，容易误以为是自己的改动出了问题）。
+`xcode-select -p` 指向 `/Library/Developer/CommandLineTools` 就是这种情况。
+
+构建出来是 ad-hoc 签名（`codesign --sign -`），不需要开发者证书，ssh 里也能编。
+
+## 发包目标与多个发送方
+
+发包地址跟着控制台选中的灯走（`SendTargets.swift`）：默认发给那台灯自己的地址，
+只有音频口与控制口不在同一地址时才在设备编辑窗里单独填「发包地址」。
+
+灯上可能同时有几个发送方（这个 App、手机推送音频、`tools/wled_sync_sender.py`）。
+LAMP1 包尾带发送方优先级，固件只认优先级最高且仍在发的那个（`usermods/lamp/lamp_sync.h`）：
+这个 App 与 Python 版是 2，手机是 1。这边静音时停发，500 ms 后手机接管；一有声音马上抢回。
+
 ## 相对 Python 版的变化
 
 | | Python 版 | 原生版 |
