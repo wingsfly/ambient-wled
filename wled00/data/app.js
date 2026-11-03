@@ -424,10 +424,9 @@ function paletteStrip() {
     return h("div", { class: "palw" }, card,
       h("button", { class: "pedit act", "aria-label": "编辑调色板", onclick: () => editPalette(p) }, "✎"));
   });
-  // 「＋ 新建」紧跟在自定义之后（没有自定义就跟在讯飞之后），即内置调色板之前
+  // 「＋ 新建」放在最前面：夹在列表中间不好找
   if (L.nextCustomSlot(customSlots(), cpalMax()) !== null) {
-    const at = choices.findIndex((p) => p.kind === "builtin");
-    cards.splice(at < 0 ? cards.length : at, 0,
+    cards.unshift(
       h("button", { class: "pal new act", onclick: newPalette }, h("i", null, "＋"), h("b", null, "新建"), h("small", null, " ")));
   }
   const strip = h("div", { class: "strip", dataset: { list: "pal" } }, cards);
