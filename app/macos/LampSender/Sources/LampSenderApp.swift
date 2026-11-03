@@ -62,6 +62,8 @@ enum ConsoleWindow { static let id = "console" }
 struct MenuContent: View {
     @ObservedObject var pipeline: Pipeline
     @Environment(\.openWindow) private var openWindow
+    /// 地址框的草稿。回车才提交 —— 边打字边提交会让发包线程一路去解析半截地址。
+    @State private var specDraft = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -145,14 +147,24 @@ struct MenuContent: View {
         }
     }
 
+    /// 发包地址。跟着控制台选中的灯走，所以这里显示的是「这台灯」的地址，
+    /// 改的也是它 —— 全局一个地址是从前的做法，控制面换了灯发包却没换，
+    /// 包就一直往老地址去（2026-11-03 实测踩到）。
     private var settings: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("板子地址").font(.caption).foregroundStyle(.secondary)
-            TextField("mDNS 名或 IP，逗号分隔多个候选", text: $pipeline.targetSpec)
+            HStack(spacing: 4) {
+                Text("发包目标").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Text(pipeline.target.deviceName ?? "未选灯")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            TextField(specPrompt, text: $specDraft)
                 .textFieldStyle(.roundedBorder).font(.caption)
-                .disabled(pipeline.running)
-            Text(pipeline.running ? "停止后才能改地址" : "按序解析，取第一个能解析的")
+                .onSubmit { pipeline.setTargetSpec(specDraft) }
+            Text(specHint)
                 .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             HStack {
                 Text("输入增益").font(.caption).foregroundStyle(.secondary)
@@ -161,6 +173,27 @@ struct MenuContent: View {
                     .font(.caption.monospacedDigit()).frame(width: 40, alignment: .trailing)
             }
         }
+        .onAppear { specDraft = draft }
+        .onChange(of: pipeline.target) { _, _ in specDraft = draft }
+    }
+
+    /// 选了灯时，框里空着就代表「发给灯自己」，所以草稿只在专门指定过时才有值。
+    private var draft: String {
+        pipeline.target.deviceID == nil ? pipeline.fallbackSpec
+            : (pipeline.target.isOverridden ? pipeline.target.spec : "")
+    }
+
+    private var specPrompt: String {
+        pipeline.target.deviceHost ?? "mDNS 名或 IP，逗号分隔多个候选"
+    }
+
+    private var specHint: String {
+        guard pipeline.target.deviceID != nil else {
+            return "还没选灯。在控制台里选一台，发包就跟着它走"
+        }
+        return pipeline.target.isOverridden
+            ? "专门发往 \(pipeline.target.spec)，清空即恢复发给灯自己。回车生效"
+            : "跟着控制台选中的灯。要发往别的地址就填在这里，回车生效"
     }
 
     private var footer: some View {

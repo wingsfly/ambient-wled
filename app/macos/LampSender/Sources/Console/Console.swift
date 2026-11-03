@@ -63,6 +63,17 @@ struct ConsoleView: View {
             // 错误只在窗口顶部飘一下，ssh 下看不见 —— 单独留一份
             UserDefaults.standard.set(e ?? "", forKey: "consoleError")
         }
+        // 发包目标跟着选中的灯走 —— 控制面连着 A、UDP 却发去 B 是实测踩过的坑。
+        // 断开连接时不动发包对象：菜单栏那条音频链路和控制面是两件事。
+        .onChange(of: model.selected?.id, initial: true) { _, id in
+            if let id { Pipeline.shared.bind(deviceID: id) }
+        }
+        // 灯换了地址（手动改、或自动发现给了新 IP）发包也得跟着换；灯删掉了就
+        // 把它那条专门指定的发包地址一并清掉。
+        .onChange(of: model.book.devices) { _, ds in
+            SendTargets.prune(keeping: Set(ds.map(\.id)))
+            Pipeline.shared.retarget()
+        }
         // 侧边栏 210 固定 + 详情页最窄 500 + 分隔。边栏可以收起，收起后窗口能
         // 拖到更窄。
         .frame(minWidth: 720, minHeight: 500)
@@ -224,13 +235,15 @@ struct LabeledSlider: View {
     }
 }
 
-/// 改名字和地址。空的不让存；其余错误（重复地址等）由设备簿判定，显示在框下。
+/// 改名字、地址与发包地址。空的不让存（发包地址除外，空就是「发给灯自己」）；
+/// 其余错误（重复地址等）由设备簿判定，显示在框下。
 private struct DeviceEditSheet: View {
     @EnvironmentObject private var model: LampViewModel
     @Environment(\.dismiss) private var dismiss
     let device: LampDevice
     @State private var name = ""
     @State private var host = ""
+    @State private var sendHost = ""
     @State private var error: String?
 
     var body: some View {
@@ -239,17 +252,25 @@ private struct DeviceEditSheet: View {
             Form {
                 TextField("名字", text: $name)
                 TextField("地址", text: $host, prompt: Text("IP 或主机名"))
+                TextField("发包地址", text: $sendHost, prompt: Text("留空 = 同上"))
             }
             if let error { Text(error).font(.caption).foregroundStyle(.red) }
             if !device.isManual {
                 Text("改了地址就按手填处理，自动发现不再改写它。").font(.caption).foregroundStyle(.secondary)
             }
+            Text("音频 UDP 默认就发给这台灯自己。只有板子的音频口与控制口不在同一地址时才单独填发包地址。")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Spacer()
                 Button("取消", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("保存") {
                     error = model.renameOrReaddress(id: device.id, name: name, host: host)
-                    if error == nil { dismiss() }
+                    guard error == nil else { return }
+                    // 身份（id）不随改名、改地址变化，所以这条指定跟得住
+                    SendTargets.setOverride(sendHost, for: device.id)
+                    Pipeline.shared.retarget()
+                    dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty
@@ -258,7 +279,10 @@ private struct DeviceEditSheet: View {
         }
         .padding(20)
         .frame(width: 340)
-        .onAppear { name = device.name; host = device.host }
+        .onAppear {
+            name = device.name; host = device.host
+            sendHost = SendTargets.override(for: device.id) ?? ""
+        }
         .onChange(of: name) { _, _ in error = nil }
         .onChange(of: host) { _, _ in error = nil }
     }

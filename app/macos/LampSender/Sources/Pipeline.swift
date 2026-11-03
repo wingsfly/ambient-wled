@@ -2,13 +2,24 @@ import Foundation
 import SwiftUI
 import Synchronization
 
-/// 跨线程的停止标志与增益旋钮。
+/// 跨线程的停止标志、增益旋钮与发包目标。
 ///
 /// 工作线程不能去读 `@MainActor` 的属性（`MainActor.assumeIsolated` 在别的
-/// 线程上是直接断言失败，不是回退），所以这两个值单独装在能跨线程读的盒子里。
+/// 线程上是直接断言失败，不是回退），所以这几个值单独装在能跨线程读的盒子里。
 final class ControlBox: @unchecked Sendable {
     private let stop = Atomic<Bool>(false)
     private let gainBits = Atomic<UInt32>(Float(1.0).bitPattern)
+    /// 字符串塞不进 Atomic，单独上锁：主线程在换灯或改地址时写，工作线程每轮
+    /// 读一次 —— 换一台灯不必重启整条管线。
+    private let targetLock = NSLock()
+    private var target: String
+
+    init(target: String) { self.target = target }
+
+    var targetSpec: String {
+        get { targetLock.lock(); defer { targetLock.unlock() }; return target }
+        set { targetLock.lock(); target = newValue; targetLock.unlock() }
+    }
 
     var shouldStop: Bool { stop.load(ordering: .relaxed) }
     func requestStop() { stop.store(true, ordering: .relaxed) }
@@ -77,7 +88,12 @@ final class Pipeline: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var tapSampleRate: Double = 0
 
-    @Published var targetSpec: String { didSet { defaults.set(targetSpec, forKey: "targetSpec") } }
+    /// 还没选过灯时发往哪里。选了灯就以那台灯为准 —— 见 `SendTargets`。
+    @Published var fallbackSpec: String {
+        didSet { defaults.set(fallbackSpec, forKey: SendTargets.fallbackKey); retarget() }
+    }
+    /// 当前真正在发给谁。菜单栏显示它，也靠它判断地址框改的是哪台灯。
+    @Published private(set) var target = SendTargets.Resolved(spec: "")
     @Published var inputGain: Double {
         didSet { defaults.set(inputGain, forKey: "inputGain"); control?.gain = Float(inputGain) }
     }
@@ -96,13 +112,36 @@ final class Pipeline: ObservableObject {
     private var control: ControlBox?
 
     init() {
-        // 默认值不该指向某一台具体的灯 —— 这是个公开仓库，别人 clone 下来
-        // 不该默认往作者的设备发包。wled.local 是 WLED 的通用名；解析不到就
-        // 退回组播，同网段照样送得到，跨网段再手填地址。
-        targetSpec = defaults.string(forKey: "targetSpec") ?? "wled.local"
+        fallbackSpec = SendTargets.fallback(defaults)
         inputGain = defaults.object(forKey: "inputGain") as? Double ?? 1.0
         autoStart = defaults.object(forKey: "autoStart") as? Bool ?? true
         clapEnabled = defaults.object(forKey: "clapEnabled") as? Bool ?? true
+        target = SendTargets.current(defaults)
+    }
+
+    // MARK: - 发包目标
+
+    /// 重算发包目标并推给工作线程。切灯、改地址、设备簿更新之后都要调。
+    func retarget() {
+        target = SendTargets.current(defaults)
+        control?.targetSpec = target.spec
+    }
+
+    /// 控制台选了哪台灯就发给哪台灯。控制台关着时沿用上次选的那台。
+    func bind(deviceID: String) {
+        SendTargets.setDeviceID(deviceID, defaults)
+        retarget()
+    }
+
+    /// 给当前这台灯单独指定发包地址，传空即恢复「发给灯自己」。
+    /// 还没选灯时改的是兜底地址。
+    func setTargetSpec(_ spec: String) {
+        guard let id = target.deviceID else {
+            fallbackSpec = spec.trimmingCharacters(in: .whitespacesAndNewlines)
+            return      // didSet 已经 retarget
+        }
+        SendTargets.setOverride(spec, for: id, defaults)
+        retarget()
     }
 
     func startIfAutoStart() { if autoStart { start() } }
@@ -170,7 +209,8 @@ final class Pipeline: ObservableObject {
         guard let resampler = Resampler(from: tap.format.sampleRate, to: engine.sampleRate) else {
             tap.stop(); lastError = "重采样器建不起来（\(tap.format.sampleRate) → \(engine.sampleRate)）"; return
         }
-        let box = ControlBox()
+        retarget()      // 控制台或设备簿可能在上次启动之后改过
+        let box = ControlBox(target: target.spec)
         box.gain = Float(inputGain)
         control = box
         tapSampleRate = tap.format.sampleRate
@@ -181,13 +221,13 @@ final class Pipeline: ObservableObject {
         let window = SlidingWindow(capacity: ClapEngine.windowSamples)
         if clapEnabled { startClapWorker(window: window, mood: mood, control: box) }
 
-        // 这两个值必须在进线程闭包**之前**取出来：它们是 @MainActor 隔离的，
-        // 在 Sendable 闭包里读到 Swift 6 就是编译错误，不只是警告。
-        let spec = targetSpec
+        // 这个值必须在进线程闭包**之前**取出来：它是 @MainActor 隔离的，在
+        // Sendable 闭包里读到 Swift 6 就是编译错误，不只是警告。发包目标不在
+        // 此列 —— 它住在 box 里，工作线程自己去读，所以中途换灯也跟得上。
         let clapWindow: SlidingWindow? = clapEnabled ? window : nil
         let t = Thread { [self] in
             Pipeline.run(ring: ring, tap: tap, engine: engine, resampler: resampler,
-                         targetSpec: spec, control: box,
+                         control: box,
                          clapWindow: clapWindow, mood: mood) { s in
                 Task { @MainActor in
                     var merged = s
@@ -238,11 +278,11 @@ final class Pipeline: ObservableObject {
 
     // 工作线程主体。静态且 nonisolated —— 不碰任何 @MainActor 状态。
     private nonisolated static func run(ring: AudioRing, tap: AudioTap, engine: LampEngine,
-                                        resampler: Resampler, targetSpec: String,
+                                        resampler: Resampler,
                                         control: ControlBox,
                                         clapWindow: SlidingWindow?, mood: MoodBox,
                                         publish: @escaping @Sendable (Stats) -> Void) {
-        let sender = UDPSender(targetSpec: targetSpec)
+        let sender = UDPSender(targetSpec: control.targetSpec)
         let enc = PacketEncoder()
         let chunkMax = 4096
         let scratch = UnsafeMutablePointer<Float>.allocate(capacity: chunkMax)
@@ -293,6 +333,7 @@ final class Pipeline: ObservableObject {
                 packets += 1
             }
 
+            sender.updateTarget(control.targetSpec)   // 换灯 / 改地址即时生效
             sender.tick()
             let now = Date()
             if now.timeIntervalSince(lastPublish) >= 1.0 {
