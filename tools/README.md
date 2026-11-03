@@ -2,6 +2,9 @@
 
 两条路子，跑的都是**固件的同一份代码**（`usermods/lamp/`），不是复刻品。
 
+`usermods/lamp` 是子模块（ambient-lamp-core），克隆时带上 `--recurse-submodules`；
+已经克隆了的，用 `git submodule update --init` 补上。
+
 | | 用途 |
 |---|---|
 | **实时版**（`sim/index.html` + `server.py`） | 边放音乐边看灯效。浏览器采 PCM → WebSocket → 服务端 C++ 分析并渲染 → 页面只画十六进制串 |
