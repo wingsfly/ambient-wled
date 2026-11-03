@@ -475,19 +475,16 @@ private struct PaletteGallery: View {
     @State private var loading = false
 
     var body: some View {
-        // 顺序是讯飞 → 自定义 → 内置；「＋ 新建」紧跟在自定义之后（没有自定义就跟在讯飞之后）
+        // 顺序是讯飞 → 自定义 → 内置；「＋ 新建」放在最前面（夹在列表中间不好找）
         let choices = model.paletteChoices
-        let lead = choices.prefix { $0.kind != .builtin }
-        let rest = choices.dropFirst(lead.count)
         VStack(alignment: .leading, spacing: 6) {
             Text("调色板 · \(choices.first { $0.id == current }?.title ?? "")")
                 .font(.caption).foregroundStyle(.secondary)
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], spacing: 8) {
-                        ForEach(lead) { p in card(p).id(p.id) }
                         if model.canCreatePalette { newCard }
-                        ForEach(rest) { p in card(p).id(p.id) }
+                        ForEach(choices) { p in card(p).id(p.id) }
                     }
                     .padding(2)
                 }
