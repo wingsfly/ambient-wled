@@ -1,0 +1,3 @@
+[submodule "usermods/lamp"]
+	path = usermods/lamp
+	url = ../ambient-lamp-core.git

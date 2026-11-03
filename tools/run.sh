@@ -22,7 +22,7 @@ case "${1:-status}" in
     fi
     [ -f "liblamp.$EXT" ] || ./build.sh
     # 源码比库新就重编，省得改了 C++ 忘记构建、对着旧行为纳闷
-    for f in lamp_capi.cpp lamp_fft.h ../usermods/lamp/*.h; do
+    for f in ../usermods/lamp/capi/* ../usermods/lamp/*.h; do
       [ "$f" -nt "liblamp.$EXT" ] && { echo "源码有更新，重新构建"; ./build.sh; break; }
     done
     # 套一层重启循环。C++ 侧的段错误会直接杀掉整个 Python 进程（线上遇到过

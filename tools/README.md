@@ -5,7 +5,7 @@
 | | 用途 |
 |---|---|
 | **实时版**（`sim/index.html` + `server.py`） | 边放音乐边看灯效。浏览器采 PCM → WebSocket → 服务端 C++ 分析并渲染 → 页面只画十六进制串 |
-| **离线版**（`simulate.cpp`） | 读 WAV 出逐帧 JSON。不需要浏览器，适合批量回归与写脚本对比 |
+| **离线版**（`usermods/lamp/capi/simulate.cpp`） | 读 WAV 出逐帧 JSON。不需要浏览器，适合批量回归与写脚本对比 |
 
 ## 实时版
 
@@ -33,7 +33,7 @@
 ## 离线版
 
 ```bash
-c++ -std=c++17 -O2 -I ../usermods/lamp simulate.cpp -o simulate
+c++ -std=c++17 -O2 -I ../usermods/lamp -I ../usermods/lamp/capi ../usermods/lamp/capi/simulate.cpp -o simulate
 
 ./simulate song.wav out.json          # 16-bit PCM WAV
 ./simulate --synth out.json 128       # 合成 128BPM 测试轨
@@ -44,7 +44,7 @@ c++ -std=c++17 -O2 -I ../usermods/lamp simulate.cpp -o simulate
 主机上 FFT 用朴素 DFT（目标板是 esp-dsp）。N=2048 时每帧 210 万次运算，
 一分钟音频约十几秒 —— 慢，但零依赖。
 
-另有 [`lamp_calib.cpp`](lamp_calib.cpp)：跑完整管线、打印**判据函数的实参**，
+另有 [`lamp_calib.cpp`](../usermods/lamp/capi/lamp_calib.cpp)（在 lamp-core 子模块里）：跑完整管线、打印**判据函数的实参**，
 用来标定自动选灯效的阈值。时长是命令行参数，`for MS in 30000 45000 90000;
 do ./calib $MS; done` 就是一次跨时长复现性检验。
 

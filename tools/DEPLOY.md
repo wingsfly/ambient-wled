@@ -34,7 +34,7 @@ cd <部署路径>/tools
 
 > 注意：**Mac 端 sender 是另一回事，它确实挂了 launchd 常驻**，而且就在一台标着
 > `temporary-workloads-only` 的机器上。那是个已知的冲突，记在
-> [tools/sender/README.md](sender/README.md)，不是这一节的例外。
+> [usermods/lamp/sender/README.md](../usermods/lamp/sender/README.md)（lamp-core 子模块），不是这一节的例外。
 
 ## 怎么打开 —— 这一段要紧
 
@@ -83,9 +83,9 @@ ssh -L 8080:localhost:8080 <目标主机>
 说明 C++ 侧崩了 —— 那行时间戳能对上系统的崩溃报告。
 
 - **`找不到 liblamp`**：`./build.sh`
-- **`LampFrameC 布局不一致`**：改过 `lamp_capi.cpp` 的结构体但没同步改 `server.py`
+- **`LampFrameC 布局不一致`**：改过 `usermods/lamp/capi/lamp_capi.cpp` 的结构体但没同步改 `server.py`
 
 ## Mac 端 sender（另一套东西）
 
 这一篇讲的是**模拟器**（`~/lamp-sim`，页面在目标机 8080）。给灯发 LAMP1 包的
-Mac 端 sender 是独立的常驻服务，部署脚本和 launchd 定义在 [tools/sender/](sender/)。
+Mac 端 sender 是独立的常驻服务，部署脚本和 launchd 定义在 [usermods/lamp/sender/](../usermods/lamp/sender/)（lamp-core 子模块）。

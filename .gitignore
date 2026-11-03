@@ -31,3 +31,6 @@ wled-update.sh
 /wled00/html_*.h
 /wled00/js_*.h
 backups/**/*.bin
+
+# lamp-core 子模块构建出的 liblamp（tools/build.sh）
+tools/liblamp.*
