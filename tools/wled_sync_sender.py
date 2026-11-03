@@ -3,7 +3,7 @@
 
 BlackHole 采样（22050Hz，CoreAudio 自动重采样）→ liblamp（与固件/模拟器
 同一份 C++：FFT/HPSS/色度/音高/人声/节拍/段落/档位）→ 双协议发送：
-  · LAMP1 (11989)：完整 AudioFrame，336B —— ♪ lamp 灯效的旋律/人声类吃它
+  · LAMP1 (11989)：完整 AudioFrame，342B（v3，包尾带发送方优先级）—— ♪ lamp 灯效的旋律/人声类吃它
   · WLED V2 (11988)：44B 兼容包 —— WLED 原生音频灯效（Gravimeter 等）吃它
 包布局与 usermods/lamp/lamp_wled_fx.cpp 的 LampSyncPacket 逐字节对应，
 改一边必须同步另一边。AGC/静音门由 lamp 管线内建（gain/gated），不再自做。
@@ -60,8 +60,9 @@ class LampFrameC(C.Structure):
                 ("auto_perc", C.c_float), ("auto_split", C.c_float),
                 ("px", C.c_uint8 * (NLED * 3))]
 
-LAMP1_FMT = "<6sBB48f12f20fbBBBifB"     # 341B v2（尾部 valence + emo_id），与 LampSyncPacket 对应
-assert struct.calcsize(LAMP1_FMT) == 341
+LAMP1_FMT = "<6sBB48f12f20fbBBBifBB"    # 342B v3（尾部 valence + emo_id + prio），与 LampSyncPacket 对应
+assert struct.calcsize(LAMP1_FMT) == 342
+SENDER_PRIO = 2   # 桌面端，与 usermods/lamp/lamp_sync.h 的 kSenderDesktop 一致：高于手机
 
 def find_device(sub, kind):
     for i, d in enumerate(sd.query_devices()):
@@ -199,7 +200,7 @@ def main():
                            f.percussive, f.bar_conf, f.vocal,
                            max(-1, min(11, f.key_root)), max(0, min(255, f.preset)),
                            f.bpb & 0xFF, f.bar_pos & 0xFF, f.bar_index,
-                           clap["valence"], clap.get("emo_id", 255))
+                           clap["valence"], clap.get("emo_id", 255), SENDER_PRIO)
         # V2 兼容包：bands 按 kFxBandScale=6 反向（实测恰好满格）。
         # rms→vol 必须包络归一而不是固定系数：AGC 稳态随素材漂（实测
         # 0.03→0.12），固定系数会恒饱和 → 原生效果失去动态（实测踩中）。
